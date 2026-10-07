@@ -3,7 +3,7 @@ name: Yayınla
 on:
   push:
     branches: [claude/discord-like-chat-app-dzvaz5, main]
-    paths: [src/**, build.mjs, package.json, package-lock.json]
+    paths: [src/**, public/**, build.mjs, package.json, package-lock.json]
   workflow_dispatch:
 permissions:
   contents: write
