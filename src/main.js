@@ -2030,13 +2030,13 @@ function renderMusic() {
   if (!st || !st.cur) { el.hidden = true; stopMusicClock(); return }
   el.hidden = false
   const muted = S.settings.mmute
-  $('#minfo').innerHTML = `<div class="mrow"><img class="mthumb" src="https://i.ytimg.com/vi/${st.cur.id}/mqdefault.jpg" alt="" loading="lazy" decoding="async">
+  $('#minfo').innerHTML = `<div class="mrow"><img class="mthumb" src="https://i.ytimg.com/vi/${st.cur.id}/mqdefault.jpg" alt="" loading="lazy" decoding="async" onerror="this.style.visibility='hidden'">
     <div class="mtext"><div class="mt" title="${esc(st.cur.t)}">${esc(st.cur.t)}</div><div class="msub">🎵 Kanka Müzik · ekleyen ${esc(st.cur.by)}${st.q.length ? ` · sırada ${st.q.length}` : ''}</div></div></div>
     <div class="mprog"><span id="mtime">0:00</span><div class="mbar"><i id="mbar"></i></div><span id="mdur">–:––</span></div>
     ${MP.blocked ? '<button class="btn full" data-act="m-start" style="margin-top:6px">▶ Müziği başlat</button>' : ''}
     <div class="mctl"><button data-act="m-toggle" title="${st.playing ? 'Duraklat' : 'Devam'}">${st.playing ? '⏸️' : '▶️'}</button><button data-act="m-skip" title="Sıradakine geç">⏭️</button><button data-act="m-stop" title="Durdur ve sırayı temizle">⏹️</button></div>
     <div class="mvolrow"><button data-act="m-mute" title="${muted ? 'Sesi aç' : 'Sustur'}">${muted ? '🔇' : S.settings.mvol < 40 ? '🔉' : '🔊'}</button><input type="range" min="0" max="100" value="${S.settings.mvol}" id="mvol" aria-label="Bot sesi"><span id="mvolv">%${S.settings.mvol}</span></div>
-    <div class="mhint">Bot sesi (sadece senin duyduğun)${(st.vol ?? 100) !== 100 ? ` · kanal sesi %${st.vol} (\`!ses\`)` : ''}</div>`
+    <div class="mhint">Bot sesi (sadece senin duyduğun)${(st.vol ?? 100) !== 100 ? ` · kanal sesi %${st.vol} (!ses)` : ''}</div>`
   startMusicClock()
 }
 // İlerleme çubuğu: yalnızca panel görünürken, saniyede bir (çok ucuz)

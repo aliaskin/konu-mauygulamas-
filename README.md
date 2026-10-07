@@ -12,7 +12,9 @@ Mesajlar, ses ve görüntü doğrudan arkadaşlarının cihazlarına (P2P, WebRT
   düzenleme (↑ tuşu), silme, emoji tepkileri, “yazıyor…” göstergesi, okunmamış rozetleri
 - **Resim ve dosya paylaşımı**: yapıştır, sürükle-bırak veya ＋ butonu (resimler otomatik sıkıştırılır, dosyalar 100 MB'a kadar)
 - **🎵 Müzik botu**: ses kanalındayken `!play şarkı adı`, `!play YouTube linki` veya `!play Spotify şarkı linki`;
-  `!skip`, `!pause`, `!resume`, `!stop`, `!queue`, `!np`, `!remove 2`, `!help`. Kanaldaki herkes aynı şarkıyı senkron dinler
+  `!skip`, `!pause`, `!resume`, `!stop`, `!queue`, `!np`, `!remove 2`, `!ses 50` (herkes için bot sesi), `!help`.
+  Müzik panelindeki kaydırıcı ve 🔇 düğmesi yalnızca senin duyduğun bot sesini ayarlar. Video gösterilmez: oynatıcı görünmez ve
+  1×1 pikseldir, YouTube en düşük video kalitesini seçtiği için ek işlemci/internet yükü neredeyse yoktur. Kanaldaki herkes aynı şarkıyı senkron dinler
   (sonradan katılan doğru saniyeden girer). Her dinleyici şarkıyı kendi tarayıcısındaki resmi YouTube oynatıcısıyla çalar;
   kimsenin bilgisayarı başkası için ses yayınlamaz. Müzik sesi herkesin kendi kontrolündedir
 - **Direkt mesajlar (DM)**: üye listesinde birine tıkla → “Mesaj gönder”
