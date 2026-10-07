@@ -1,0 +1,17 @@
+{
+  "name": "kanka-chat",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Tarayıcıda çalışan, sunucusuz (P2P) Discord benzeri sohbet: yazılı, sesli, görüntülü sohbet ve ekran paylaşımı",
+  "type": "module",
+  "scripts": {
+    "build": "node build.mjs",
+    "dev": "node build.mjs && npx --yes serve docs"
+  },
+  "dependencies": {
+    "trystero": "0.26.0"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0"
+  }
+}
