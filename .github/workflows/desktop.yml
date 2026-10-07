@@ -19,10 +19,14 @@ jobs:
             script: dist:win
             files: |
               desktop/dist/KankaChat-Setup.exe
+              desktop/dist/KankaChat-Setup.exe.blockmap
+              desktop/dist/latest.yml
               desktop/dist/KankaChat-Portable.exe
           - os: ubuntu-latest
             script: dist:linux
-            files: desktop/dist/KankaChat.AppImage
+            files: |
+              desktop/dist/KankaChat.AppImage
+              desktop/dist/latest-linux.yml
     runs-on: ${{ matrix.os }}
     defaults:
       run:
@@ -35,6 +39,8 @@ jobs:
           cache: npm
           cache-dependency-path: desktop/package-lock.json
       - run: npm ci
+      # Her derleme yeni bir sürüm numarası alır; kurulu uygulamalar bununla kendini günceller
+      - run: npm version 1.0.${{ github.run_number }} --no-git-tag-version
       - run: npm run ${{ matrix.script }}
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
@@ -55,7 +61,7 @@ jobs:
       - run: ls -la out
       - uses: softprops/action-gh-release@v2
         with:
-          tag_name: desktop-v1.0.${{ github.run_number }}
+          tag_name: v1.0.${{ github.run_number }}
           name: Kanka Chat masaüstü 1.0.${{ github.run_number }}
           target_commitish: ${{ github.sha }}
           make_latest: true
@@ -64,5 +70,6 @@ jobs:
             **Linux:** `KankaChat.AppImage`
 
             Uygulama arayüzü her açılışta web sürümünden yüklenir; yeni özellikler uygulamayı yeniden kurmadan gelir.
+            Kurulu uygulama (Setup) kendi kabuğunu da arka planda günceller.
             Windows "bilinmeyen yayıncı" uyarısı verirse: **Ek bilgi → Yine de çalıştır**.
           files: out/*

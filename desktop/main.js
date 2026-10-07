@@ -32,6 +32,9 @@ let pickerDone = null
 let quitting = false
 let state = {muted: false, deafened: false, inVoice: false, unread: 0}
 let sleepBlock = null
+let updateReady = null
+let updater = null
+const canAutoStart = process.platform === 'win32' || process.platform === 'darwin'
 
 // ---------- tercihler (userData/desktop.json) ----------
 const PREFS_FILE = path.join(app.getPath('userData'), 'desktop.json')
@@ -61,6 +64,7 @@ function start() {
   createWindow()
   createTray()
   registerHotkeys()
+  setupUpdates()
   app.on('activate', showWindow)
 }
 app.on('before-quit', () => { quitting = true })
@@ -103,8 +107,12 @@ function createWindow() {
       spellcheck: false
     }
   })
-  if (prefs.maximized) win.maximize()
-  win.once('ready-to-show', () => { if (!process.argv.includes('--hidden')) win.show() })
+  // maximize() gizli pencereyi de gösterir; bu yüzden yalnızca gösterirken uygulanır
+  win.once('ready-to-show', () => {
+    if (process.argv.includes('--hidden')) return
+    if (prefs.maximized) win.maximize()
+    win.show()
+  })
 
   const wc = win.webContents
   // Yalnızca uygulamanın kendi adresi pencerede açılır; diğer linkler varsayılan tarayıcıda
@@ -126,6 +134,11 @@ function createWindow() {
     else if (input.control && k === '0') { e.preventDefault(); wc.setZoomLevel(0) }
   })
   win.on('focus', () => win.flashFrame(false))
+  const sendVis = () => { if (win && !win.isDestroyed()) send('vis', !win.isVisible() || win.isMinimized()) }
+  for (const ev of ['show', 'hide', 'minimize', 'restore']) win.on(ev, sendVis)
+  wc.on('did-finish-load', sendVis)
+  // Pencere odağı kaybolunca, genel kanca tuşu göremiyorsa bas-konuşu bırak (takılı kalmasın)
+  win.on('blur', () => { if (ptt.enabled && !pttGlobalActive()) send('ptt', false) })
   const remember = () => {
     if (win.isDestroyed()) return
     prefs.maximized = win.isMaximized()
@@ -152,6 +165,7 @@ function createWindow() {
 function showWindow() {
   if (!win) return createWindow()
   if (win.isMinimized()) win.restore()
+  if (!win.isVisible() && prefs.maximized && !win.isMaximized()) win.maximize()
   win.show()
   win.focus()
 }
@@ -166,18 +180,21 @@ function setupSession() {
   ses.setPermissionCheckHandler((wc, perm, origin) => originOf(origin) === APP_ORIGIN && ALLOWED.has(perm))
   // Web sayfası getDisplayMedia çağırınca kendi seçicimizi aç
   ses.setDisplayMediaRequestHandler(async (request, callback) => {
+    // Geri çağrı yalnızca bir kez çağrılabilir; reddetmek için null (sayfa AbortError alır)
+    let answered = false
+    const reply = v => { if (answered) return; answered = true; try { callback(v) } catch {} }
     try {
-      if (originOf(request.securityOrigin || (request.frame && request.frame.url) || '') !== APP_ORIGIN) return callback({})
+      if (originOf(request.securityOrigin || (request.frame && request.frame.url) || '') !== APP_ORIGIN) return reply(null)
       const choice = await pickSource(!!request.audioRequested)
-      if (!choice) return callback({})
+      if (!choice) return reply(null)
       const sources = await desktopCapturer.getSources({types: ['screen', 'window'], thumbnailSize: {width: 0, height: 0}})
       const src = sources.find(s => s.id === choice.id)
-      if (!src) return callback({})
+      if (!src) return reply(null)
       // Windows: 'loopback' tüm bilgisayar sesini alır (oyun sesi). Sohbet seslerinin geri yankısını
       // web uygulamasındaki yankı koruması temizler.
-      callback(choice.audio && isWin ? {video: src, audio: 'loopback'} : {video: src})
+      reply(choice.audio && isWin && request.audioRequested ? {video: src, audio: 'loopback'} : {video: src})
     } catch {
-      callback({})
+      reply(null)
     }
   }, {useSystemPicker: false})
 }
@@ -213,7 +230,7 @@ function pickSource(audioRequested) {
     picker.once('ready-to-show', () => picker && picker.show())
     picker.webContents.setWindowOpenHandler(() => ({action: 'deny'}))
     picker.webContents.on('will-navigate', e => e.preventDefault())
-    picker.loadFile(path.join(__dirname, 'picker.html'), {query: {audio: audioRequested && isWin ? '1' : '0', canAudio: isWin ? '1' : '0'}})
+    picker.loadFile(path.join(__dirname, 'picker.html'), {query: {audio: audioRequested && isWin ? '1' : '0', canAudio: isWin ? '1' : '0', requested: audioRequested ? '1' : '0'}})
   })
 }
 const fromPicker = e => !!picker && e.sender === picker.webContents
@@ -249,25 +266,37 @@ function registerHotkeys() {
 // Kanca yalnızca bas-konuş açıkken çalışır ve sadece seçilen tuşun basılıp bırakıldığına bakar.
 let hook = null
 let hookOn = false
-let ptt = {enabled: false, key: null}
+// key: KeyboardEvent.code ('KeyV') veya 'Mouse4'; raw: kancanın kendi gördüğü kod ({k} tuş / {b} fare) —
+// klavye düzeninden bağımsız eşleşme için tuş atanırken kaydedilir
+let ptt = {enabled: false, key: null, raw: null}
 let pttDown = false
+let capture = null
+const keyIs = e => {
+  if (!ptt.key) return false
+  if (ptt.raw && ptt.raw.k) return e.keycode === ptt.raw.k
+  return !ptt.key.startsWith('Mouse') && e.keycode === uioKey(ptt.key)
+}
+const btnIs = e => {
+  if (!ptt.key) return false
+  if (ptt.raw && ptt.raw.b) return e.button === ptt.raw.b
+  return ptt.key.startsWith('Mouse') && e.button === Number(ptt.key.slice(5))
+}
 function loadHook() {
   if (hook === null) {
     try {
       hook = require('uiohook-napi')
-      const want = (match, down) => e => { if (match(e)) setPtt(down) }
-      const keyIs = e => ptt.key && !ptt.key.startsWith('Mouse') && e.keycode === uioKey(ptt.key)
-      const btnIs = e => ptt.key && ptt.key.startsWith('Mouse') && e.button === Number(ptt.key.slice(5))
-      hook.uIOhook.on('keydown', want(keyIs, true))
-      hook.uIOhook.on('keyup', want(keyIs, false))
-      hook.uIOhook.on('mousedown', want(btnIs, true))
-      hook.uIOhook.on('mouseup', want(btnIs, false))
+      hook.uIOhook.on('keydown', e => { if (capture) return capture({k: e.keycode}); if (keyIs(e)) setPtt(true) })
+      hook.uIOhook.on('keyup', e => { if (keyIs(e)) setPtt(false) })
+      hook.uIOhook.on('mousedown', e => { if (capture && e.button >= 3) return capture({b: e.button}); if (btnIs(e)) setPtt(true) })
+      hook.uIOhook.on('mouseup', e => { if (btnIs(e)) setPtt(false) })
     } catch {
       hook = false
     }
   }
   return hook
 }
+// Kanca şu an seçili tuşu görebiliyor mu?
+const pttGlobalActive = () => hookOn && !!ptt.key && (!!ptt.raw || ptt.key.startsWith('Mouse') || uioKey(ptt.key) !== undefined)
 // KeyboardEvent.code → uiohook tuş kodu
 function uioKey(code) {
   const K = hook && hook.UiohookKey
@@ -311,7 +340,8 @@ function stopHook() {
   if (!hookOn) return
   try { hook.uIOhook.stop() } catch {}
   hookOn = false
-  pttDown = false
+  // Kanca dururken bekleyen bırakma olayı kaybolabilir: basılı kaldıysa bırakıldı say
+  setPtt(false)
 }
 
 // ---------- sistem tepsisi, rozet, Windows ile başlama ----------
@@ -340,9 +370,10 @@ function updateTray() {
     {label: state.muted ? 'Mikrofonu aç' : 'Mikrofonu kapat', enabled: state.inVoice, click: () => send('hotkey', 'mute')},
     {label: state.deafened ? 'Sesi aç (sağırlaştırmayı kaldır)' : 'Sağırlaştır', click: () => send('hotkey', 'deafen')},
     {type: 'separator'},
-    {label: 'Bilgisayar açılınca başlat', type: 'checkbox', checked: autoStart(), click: i => setAutoStart(i.checked)},
+    ...(canAutoStart ? [{label: 'Bilgisayar açılınca başlat', type: 'checkbox', checked: autoStart(), click: i => setAutoStart(i.checked)}] : []),
     {label: 'Kapatınca tepsiye küçült', type: 'checkbox', checked: prefs.closeToTray, click: i => { prefs.closeToTray = i.checked; savePrefs() }},
     {type: 'separator'},
+    ...(updateReady ? [{label: `Güncellemeyi kur ve yeniden başlat (${updateReady})`, click: () => { quitting = true; updater.quitAndInstall() }}] : []),
     {label: 'Çıkış', click: () => { quitting = true; app.quit() }}
   ]))
 }
@@ -376,8 +407,34 @@ ipcMain.on('app:state', (e, s) => {
 })
 ipcMain.on('app:ptt', (e, p) => {
   if (!fromApp(e)) return
-  ptt = {enabled: !!(p && p.enabled), key: p && typeof p.key === 'string' ? p.key.slice(0, 32) : null}
+  const raw = p && p.raw && typeof p.raw === 'object' ? p.raw : null
+  ptt = {
+    enabled: !!(p && p.enabled),
+    key: p && typeof p.key === 'string' ? p.key.slice(0, 32) : null,
+    raw: raw && Number.isInteger(raw.k) ? {k: raw.k} : raw && Number.isInteger(raw.b) ? {b: raw.b} : null
+  }
   updatePtt()
+})
+// Bas-konuş tuşu atanırken kancanın gördüğü kodu da yakala (10 sn içinde basılan ilk tuş / fare yan tuşu)
+ipcMain.handle('app:captureKey', e => {
+  if (!fromApp(e)) return null
+  const h = loadHook()
+  if (!h) return null
+  if (capture) capture(null)
+  return new Promise(resolve => {
+    const wasOn = hookOn
+    if (!hookOn) {
+      try { h.uIOhook.start(); hookOn = true } catch { return resolve(null) }
+    }
+    const t = setTimeout(() => finish(null), 10000)
+    function finish(r) {
+      clearTimeout(t)
+      capture = null
+      if (!wasOn && !(ptt.enabled && ptt.key)) stopHook()
+      resolve(r)
+    }
+    capture = finish
+  })
 })
 ipcMain.on('app:setPref', (e, p) => {
   if (!fromApp(e) || !p) return
@@ -390,11 +447,34 @@ ipcMain.handle('app:prefs', e => {
   return {
     version: app.getVersion(),
     platform: process.platform,
-    autoStart: autoStart(),
+    autoStart: canAutoStart && autoStart(),
+    autoStartSupported: canAutoStart,
     closeToTray: prefs.closeToTray,
     hotkeys: prefs.hotkeys,
     hotkeyNames: HOTKEYS,
     globalPtt: !!loadHook(),
+    updateReady,
     systemAudio: isWin
   }
 })
+
+// ---------- otomatik güncelleme (kurulu Windows sürümü ve AppImage) ----------
+// Arayüz zaten her açılışta web'den güncel gelir; bu, uygulama kabuğunu (Electron/Chromium güvenlik
+// düzeltmeleri dahil) GitHub Releases'ten arka planda günceller ve kapanışta kurar.
+function setupUpdates() {
+  if (!app.isPackaged || process.env.PORTABLE_EXECUTABLE_FILE) return
+  if (process.platform === 'linux' && !process.env.APPIMAGE) return
+  try { updater = require('electron-updater').autoUpdater } catch { return }
+  updater.autoDownload = true
+  updater.autoInstallOnAppQuit = true
+  updater.on('error', () => {})
+  updater.on('update-downloaded', info => {
+    updateReady = info && info.version ? String(info.version) : 'yeni'
+    updateTray()
+    send('update', updateReady)
+    if (isWin && tray) tray.displayBalloon({title: 'Kanka Chat güncellemesi hazır', content: `Sürüm ${updateReady} indirildi; uygulama kapanınca kurulacak.`})
+  })
+  const check = () => { try { updater.checkForUpdates().catch(() => {}) } catch {} }
+  setTimeout(check, 15000)
+  setInterval(check, 6 * 3600 * 1000)
+}

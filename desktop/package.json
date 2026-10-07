@@ -13,7 +13,8 @@
     "dist:linux": "electron-builder --linux --x64 --publish never"
   },
   "dependencies": {
-    "uiohook-napi": "1.5.5"
+    "uiohook-napi": "1.5.5",
+    "electron-updater": "6.8.9"
   },
   "devDependencies": {
     "electron": "44.6.0",
@@ -28,14 +29,14 @@
       "buildResources": "build"
     },
     "files": [
+      "build/badge.png",
+      "build/icon.png",
       "main.js",
-      "preload.js",
+      "offline.html",
+      "package.json",
       "picker-preload.js",
       "picker.html",
-      "offline.html",
-      "build/icon.png",
-      "build/badge.png",
-      "package.json"
+      "preload.js"
     ],
     "asarUnpack": [
       "node_modules/uiohook-napi/**"
@@ -83,7 +84,12 @@
       "category": "Network",
       "artifactName": "KankaChat.${ext}"
     },
-    "publish": null
+    "publish": {
+      "provider": "github",
+      "owner": "aliaskin",
+      "repo": "konu-mauygulamas-",
+      "releaseType": "release"
+    }
   },
   "repository": "github:aliaskin/konu-mauygulamas-"
 }

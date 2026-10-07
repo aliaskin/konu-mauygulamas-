@@ -62,12 +62,15 @@
 <script>
   const q = new URLSearchParams(location.search)
   const audio = document.getElementById('audio')
-  if (q.get('canAudio') === '1') audio.checked = q.get('audio') === '1'
-  else {
+  const noAudio = msg => {
     audio.disabled = true
+    audio.checked = false
     document.getElementById('audioRow').style.opacity = '.5'
-    document.getElementById('audioSub').textContent = 'Bu işletim sisteminde bilgisayar sesi paylaşılamıyor.'
+    document.getElementById('audioSub').textContent = msg
   }
+  if (q.get('canAudio') !== '1') noAudio('Bu işletim sisteminde bilgisayar sesi paylaşılamıyor.')
+  else if (q.get('requested') !== '1') noAudio('Yayın penceresinde “Oyun / bilgisayar sesini de paylaş” kapalı.')
+  else audio.checked = q.get('audio') === '1'
   const grid = document.getElementById('grid')
   const go = document.getElementById('go')
   let sources = [], tab = 'screen', selected = null

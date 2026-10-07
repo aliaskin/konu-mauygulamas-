@@ -27,6 +27,9 @@ const PAGE = 80
 const DESK = window.kankaDesktop || null
 const DESKTOP_URL = 'https://github.com/aliaskin/konu-mauygulamas-/releases/latest/download/KankaChat-Setup.exe'
 const isWindows = /Windows/i.test(navigator.userAgent)
+// Sayfa görünmüyor mu (küçültülmüş / tepside)? Kullanıcı başka yerde mi (odak başka pencerede)?
+const pageHidden = () => document.hidden || !!(DESK && DESK.isHidden && DESK.isHidden())
+const awayFromApp = () => pageHidden() || (!!DESK && !document.hasFocus())
 // Hesap ve ayarlar ayrıca IndexedDB'ye (ve kimlik + sunucular çereze) yansıtılır; biri silinirse diğerinden dönülür
 const MIRROR = new Set(['kd_me', 'kd_servers', 'kd_set', 'kd_dms', 'kd_vol', 'kd_svol', 'kd_lastch', 'kd_st'])
 const LS = {
@@ -473,7 +476,7 @@ function receive(key, m, senderUid, live) {
     else if (r === 'upd') refreshMsg(m.id)
     else inv('msgs')
   }
-  if (r === 'new' && live && m.uid !== S.me.uid && (key !== cur || document.hidden)) {
+  if (r === 'new' && live && m.uid !== S.me.uid && (key !== cur || awayFromApp())) {
     const isDm = key.startsWith('dm|')
     const ment = mentionsMe(m.x)
     const u = S.unread[key] ||= {n: 0, m: 0}
@@ -921,8 +924,15 @@ function updateTitle() {
     if (sig !== S.deskSig) { S.deskSig = sig; DESK.setState(st) }
   }
 }
+function onVisChange() {
+  updateWatchLevels()
+  if (!awayFromApp()) {
+    const k = curKey()
+    if (k && S.unread[k]) { delete S.unread[k]; inv('rail', 'side') }
+  }
+}
 function syncDesktop() {
-  DESK?.setPtt({enabled: !!S.settings.ptt, key: S.settings.pttKey})
+  DESK?.setPtt({enabled: !!S.settings.ptt, key: S.settings.pttKey, raw: S.settings.pttRaw || null})
 }
 
 // ======================= gezinme =======================
@@ -1418,7 +1428,8 @@ async function startScreen() {
       stream = await navigator.mediaDevices.getDisplayMedia({...base, systemAudio: extra.systemAudio})
     }
   } catch (e) {
-    if (e.name !== 'NotAllowedError') toast('Ekran paylaşılamadı: ' + (e.name || e.message))
+    // Masaüstü seçicisinden vazgeçmek AbortError olarak gelir
+    if (e.name !== 'NotAllowedError' && !(DESK && e.name === 'AbortError')) toast('Ekran paylaşılamadı: ' + (e.name || e.message))
     return
   }
   const t = stream.getVideoTracks()[0]
@@ -1534,7 +1545,7 @@ function watchLevel(pid) {
   const el = S.tileEls.get(key)
   const vid = el?.querySelector('video')
   if (vid && document.pictureInPictureElement === vid) return {lv: 'full', h: stepUp(screenPx())}
-  if (!el || !el.isConnected || !S.showStage || document.hidden) return {lv: 'off', h: 0}
+  if (!el || !el.isConnected || !S.showStage || pageHidden()) return {lv: 'off', h: 0}
   if (document.fullscreenElement === el) return {lv: 'full', h: stepUp(screenPx())}
   // Netlik için kutucuğun piksel yüksekliğinin üstünde çözünürlük iste (yazılar keskin kalsın)
   const h = el.clientHeight * (window.devicePixelRatio || 1)
@@ -1616,7 +1627,7 @@ const mbps = b => (b / 1e6).toFixed(1) + ' Mbps'
 async function pollStats() {
   const v = S.voice
   if (!v || !S.showStage || (!v.scr && !v.watching.size)) return stopStats()
-  if (document.hidden) return
+  if (pageHidden()) return
   const c = S.conns[v.sid]
   if (!c) return
   const peers = c.room.getPeers()
@@ -2057,7 +2068,7 @@ function renderMusic() {
 function startMusicClock() {
   if (MP.clock) return
   MP.clock = setInterval(() => {
-    if (document.hidden || !MP.isReady || !$('#mtime')) return
+    if (pageHidden() || !MP.isReady || !$('#mtime')) return
     try {
       const t = MP.player.getCurrentTime() || 0, d = MP.player.getDuration() || 0
       $('#mtime').textContent = fmtDur(t)
@@ -2095,7 +2106,7 @@ function musicButton(act) {
   if (act === 'm-stop') setMusic(key, {q: [], cur: null, playing: false, pos: 0})
 }
 // Kayma düzeltmesi: çalarken ara sıra konumu kontrol et
-setInterval(() => { const st = S.music[myMusicKey()]; if (st?.playing && MP.isReady && !document.hidden) applyMusic() }, 15000)
+setInterval(() => { const st = S.music[myMusicKey()]; if (st?.playing && MP.isReady && !pageHidden()) applyMusic() }, 15000)
 
 // ======================= modallar / popoverlar =======================
 function modal(html, onMount) {
@@ -2135,7 +2146,7 @@ function toast(t, ms = 4000) {
   setTimeout(() => el.remove(), ms)
 }
 function notify(title, body) {
-  if (!document.hidden || !S.settings.notif || !('Notification' in window) || Notification.permission !== 'granted') return
+  if (!awayFromApp() || !S.settings.notif || !('Notification' in window) || Notification.permission !== 'granted') return
   try { new Notification(title, {body: clamp(body, 140), tag: 'kanka', silent: true}) } catch {}
 }
 async function copy(text) {
@@ -2380,12 +2391,31 @@ async function settingsModal(tab = 'profile') {
     root.querySelector('.tabs').addEventListener('click', e => { const b = e.target.closest('[data-tab]'); if (b) show(b.dataset.tab) })
     bindColors(root, c => { color = c })
     let pttKey = s.pttKey
+    let pttRaw = s.pttRaw || null
     const kb = root.querySelector('#pttk')
     kb.addEventListener('click', () => {
       kb.textContent = 'Bir tuşa veya fare yan tuşuna bas…'
-      const done = code => { pttKey = code; kb.textContent = keyName(pttKey); removeEventListener('keydown', hk, true); removeEventListener('mousedown', hm, true) }
+      // Masaüstü: genel kancanın bu tuş için gördüğü kodu da al (klavye düzeninden bağımsız eşleşme)
+      const rawP = DESK?.captureKey ? DESK.captureKey().catch(() => null) : Promise.resolve(null)
+      const done = code => {
+        pttKey = code
+        pttRaw = null
+        kb.textContent = keyName(pttKey)
+        removeEventListener('keydown', hk, true)
+        removeEventListener('mousedown', hm, true)
+        rawP.then(r => { if (pttKey === code) pttRaw = r || null })
+      }
       const hk = e => { e.preventDefault(); done(e.code) }
-      const hm = e => { const c = mouseCode(e.button); if (c) { e.preventDefault(); done(c) } }
+      const hm = e => {
+        const c = mouseCode(e.button)
+        if (!c) return
+        e.preventDefault()
+        // Tarayıcı geri/ileri gezinmesini mouseup'ta yapar: o tek mouseup'ı da yut
+        const b = e.button
+        const hu = u => { if (u.button === b) { u.preventDefault(); u.stopPropagation(); removeEventListener('mouseup', hu, true) } }
+        addEventListener('mouseup', hu, true)
+        done(c)
+      }
       setTimeout(() => { addEventListener('keydown', hk, true); addEventListener('mousedown', hm, true) }, 0)
     })
     const lvl = root.querySelector('#lvl'), sens = f.sens
@@ -2401,10 +2431,12 @@ async function settingsModal(tab = 'profile') {
       DESK.getPrefs().then(pr => {
         if (!pr) return
         root.querySelector('#d-auto').checked = !!pr.autoStart
+        if (pr.autoStartSupported === false) root.querySelector('#d-auto').closest('.row').hidden = true
         root.querySelector('#d-tray').checked = !!pr.closeToTray
         root.querySelector('#d-keys').checked = !!pr.hotkeys
         if (!pr.globalPtt) root.querySelector('#d-info').textContent = 'Genel bas-konuş bu sistemde kullanılamıyor; bas-konuş yalnızca pencere öndeyken çalışır.'
         if (pr.version) root.querySelector('#d-info').textContent += ` Uygulama sürümü ${pr.version}.`
+        if (pr.updateReady) root.querySelector('#d-info').textContent += ` Yeni sürüm (${pr.updateReady}) indirildi; uygulama kapanınca kurulacak.`
       }).catch(() => {})
       root.querySelector('#d-auto').addEventListener('change', e => DESK.setPref('autoStart', e.target.checked))
       root.querySelector('#d-tray').addEventListener('change', e => DESK.setPref('closeToTray', e.target.checked))
@@ -2413,7 +2445,7 @@ async function settingsModal(tab = 'profile') {
     root.querySelector('#acc-code').value = accountCode()
     root.querySelector('#acc-copy').addEventListener('click', () => copy(accountCode()))
     const inst = root.querySelector('#inst')
-    inst.hidden = matchMedia('(display-mode: standalone)').matches
+    inst.hidden = !!DESK || matchMedia('(display-mode: standalone)').matches
     inst.addEventListener('click', installApp)
     root.querySelector('#acc-load').addEventListener('click', () => {
       const acc = parseAccountCode(root.querySelector('#acc-in').value)
@@ -2437,7 +2469,7 @@ async function settingsModal(tab = 'profile') {
       LS.set('kd_me', S.me)
       Object.assign(s, {
         mic: f.mic.value, cam: f.cam.value, sens: +f.sens.value, ns: f.ns.checked, ec: f.ec.checked, agc: f.agc.checked,
-        ptt: f.ptt.checked, pttKey, sounds: f.sounds.checked, echoGuard: f.echoGuard.checked, vq: f.vq.value, notif: f.notif.checked, members: f.members.checked
+        ptt: f.ptt.checked, pttKey, pttRaw, sounds: f.sounds.checked, echoGuard: f.echoGuard.checked, vq: f.vq.value, notif: f.notif.checked, members: f.members.checked
       })
       saveSettings()
       if (s.notif && 'Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(() => {})
@@ -2726,13 +2758,9 @@ function bind() {
   document.addEventListener('fullscreenchange', updateWatchLevels)
   document.addEventListener('enterpictureinpicture', updateWatchLevels, true)
   document.addEventListener('leavepictureinpicture', () => { if (!S.showStage) clearStage(); else updateWatchLevels() }, true)
-  document.addEventListener('visibilitychange', () => {
-    updateWatchLevels()
-    if (!document.hidden) {
-      const k = curKey()
-      if (k && S.unread[k]) { delete S.unread[k]; inv('rail', 'side') }
-    }
-  })
+  document.addEventListener('visibilitychange', onVisChange)
+  // Masaüstünde pencereye dönünce açık kanalın okunmamışlarını temizle
+  addEventListener('focus', onVisChange)
   addEventListener('pagehide', () => {
     flushSave()
     saveServers()
@@ -2857,7 +2885,13 @@ function boot() {
   if (DESK) {
     // Oyun öndeyken bile çalışan kısayollar ve bas-konuş (masaüstü uygulaması)
     DESK.onHotkey(n => { if (n === 'mute') setMute(!S.st.m); else if (n === 'deafen') setDeaf(!S.st.d) })
-    DESK.onPtt(down => { if (S.pttDown !== down) { S.pttDown = down; applyMic() } })
+    DESK.onPtt(down => {
+      // Kanka penceresinde yazı yazarken klavyedeki bas-konuş tuşu mikrofonu açmasın (bırakma her zaman işlenir)
+      if (down && !String(S.settings.pttKey).startsWith('Mouse') && document.hasFocus() && /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || '')) return
+      if (S.pttDown !== down) { S.pttDown = down; applyMic() }
+    })
+    DESK.onVisibility?.(() => onVisChange())
+    DESK.onUpdate?.(v => toast(`💻 Uygulama güncellemesi (${v}) indirildi; uygulamayı kapatıp açınca kurulacak.`, 8000))
     syncDesktop()
   }
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {})
