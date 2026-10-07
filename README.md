@@ -11,12 +11,17 @@ Mesajlar, ses ve görüntü doğrudan arkadaşlarının cihazlarına (P2P, WebRT
 - **Yazılı sohbet**: markdown (`**kalın**`, `*italik*`, `` `kod` ``, ```` ``` ```` blokları, `||spoiler||`), @bahsetme, yanıtlama,
   düzenleme (↑ tuşu), silme, emoji tepkileri, “yazıyor…” göstergesi, okunmamış rozetleri
 - **Resim ve dosya paylaşımı**: yapıştır, sürükle-bırak veya ＋ butonu (resimler otomatik sıkıştırılır, dosyalar 100 MB'a kadar)
+- **🎵 Müzik botu**: ses kanalındayken `!play şarkı adı`, `!play YouTube linki` veya `!play Spotify şarkı linki`;
+  `!skip`, `!pause`, `!resume`, `!stop`, `!queue`, `!np`, `!remove 2`, `!help`. Kanaldaki herkes aynı şarkıyı senkron dinler
+  (sonradan katılan doğru saniyeden girer). Her dinleyici şarkıyı kendi tarayıcısındaki resmi YouTube oynatıcısıyla çalar;
+  kimsenin bilgisayarı başkası için ses yayınlamaz. Müzik sesi herkesin kendi kontrolündedir
 - **Direkt mesajlar (DM)**: üye listesinde birine tıkla → “Mesaj gönder”
 - **Sesli sohbet**: gürültü/yankı engelleme, konuşan kişinin yeşil çerçevesi, sustur/sağırlaştır, bas-konuş (push-to-talk),
   kişi başı ses seviyesi, giriş hassasiyeti
 - **Görüntülü sohbet**: kamera aç/kapa, tıkla büyüt, tam ekran
 - **Ekran paylaşımı**: **Kaynak** (ekranın kendi çözünürlüğü, en net) / 4K / 1440p / 1080p / 720p, 30 / 60 / **120 FPS**, “Oyun/Video” (akıcılık) veya “Yazı/Kod” (netlik) modu,
-  **oyun/bilgisayar sesi** (stereo, 192 kbps; sohbetteki seslerin yayına geri karışması engellenir),
+  **oyun/bilgisayar sesi** (stereo, 192 kbps) ve **yankı koruması**: yayıncının bilgisayarında çalan sohbet sesleri
+  yayın sesinden çıkarılır, kimse kendi sesini yayından geri duymaz (oyun sesi bozulmaz),
   izleyici başına ayrı “yayın sesi” seviyesi, yayın sırasında kesintisiz kalite değiştirme, tam ekran ve resim içinde resim,
   kutucukta canlı kalite göstergesi (çözünürlük · FPS · codec · bit hızı)
 - **Kalıcı hesap**: hesabın (kimlik, ad, sunucular) tarayıcıda üç ayrı yerde saklanır (localStorage, IndexedDB, çerez);
@@ -59,6 +64,14 @@ HTTPS veren herhangi bir statik barındırma (Netlify, Cloudflare Pages, Vercel�
    Alttaki 📷 ve 🖥️ butonları kamerayı ve ekran paylaşımını açar.
 
 ## Bilmen gerekenler
+
+- **Müzik botunda isimle arama**: herkese açık YouTube arama sunucuları (Piped/Invidious) kullanılır; bunlar zaman zaman
+  çalışmayabilir. En güvenilir yol: sunucu adına tıkla → ⚙️ Sunucu ayarları → **YouTube API anahtarı** (ücretsiz;
+  console.cloud.google.com → YouTube Data API v3 → API anahtarı). Bir kişinin girmesi yeter, sunucudaki herkese gider.
+  YouTube linkleri anahtarsız da her zaman çalışır. Spotify'dan yalnızca tek şarkı linkleri açılır (şarkı YouTube'da bulunup çalınır).
+- **Yankı koruması** sesi yayıncının bilgisayarında temizler: arkadaşların sesi ve izlediği yayınların sesi çıkarılır.
+  YouTube oynatıcısının (müzik botu) sesi tarayıcı güvenliği gereği yakalanamaz; müzik çalarken sistem sesini paylaşırsan
+  müzik yayında da duyulabilir.
 
 - **Oyun sesi**: paylaşım penceresinde **“Tüm ekran”**ı seçip **“Sistem sesini de paylaş”**ı işaretle (Windows'ta Chrome/Edge).
   Sekme paylaşırken “Sekme sesini de paylaş”. Tarayıcılar tek bir pencere paylaşılırken ses vermez; macOS'ta sistem sesi

@@ -1,8 +1,10 @@
 // Kanka Chat — sunucusuz (P2P / WebRTC) Discord benzeri sohbet.
 // Eşleşme Nostr röleleri üzerinden yapılır; tüm veri (mesaj, ses, görüntü)
 // doğrudan kullanıcılar arasında uçtan uca şifreli akar.
-import {joinRoom} from 'trystero'
+import {joinRoom, selfId} from 'trystero'
 import {CODECS, HW, isHwCodec, makeTunedPC, pickCodec, probeCodecs, screenBitrate, videoStats} from './media.js'
+import {createEchoGuard} from './echo.js'
+import {isYtId, loadYouTubeApi, parseSpotify, parseYouTube, spotifyTitle, ytSearch, ytTitle} from './music.js'
 
 // ======================= yardımcılar =======================
 const APP_ID = 'kanka-chat-p2p-v1'
@@ -54,7 +56,7 @@ const S = {
   me: LS.get('kd_me', null),
   settings: Object.assign({
     ns: true, ec: true, agc: true, ptt: false, pttKey: 'KeyV', sens: 8, vq: 'med',
-    sres: 0, sfps: 0, smode: 'motion', saudio: true, sv: 2,
+    sres: 0, sfps: 0, smode: 'motion', saudio: true, sv: 2, echoGuard: true, mvol: 40,
     mic: '', cam: '', sounds: true, notif: false, members: true
   }, LS.get('kd_set', {})),
   servers: LS.get('kd_servers', []),
@@ -63,6 +65,7 @@ const S = {
   vol: LS.get('kd_vol', {}),
   svol: LS.get('kd_svol', {}),
   saudios: {},
+  music: {},
   st: Object.assign({m: false, d: false}, LS.get('kd_st', {})),
   view: LS.get('kd_view', {sid: null, cid: null}),
   conns: {},
@@ -139,6 +142,7 @@ function sanitizeMsg(m) {
     if (Object.keys(r).length) o.r = r
   }
   if (m.to) o.to = clamp(m.to, 40)
+  if (m.bot) o.bot = 1
   return o
 }
 function findIdx(arr, id) {
@@ -240,7 +244,7 @@ function sanitizeSt(d) {
   return {v: typeof d.v === 'string' ? clamp(d.v, 20) : null, m: !!d.m, d: !!d.d, cam: !!d.cam, scr: !!d.scr, spk: !!d.spk}
 }
 function metaOf(srv) {
-  return {name: srv.name, ch: srv.ch, ver: srv.ver, owner: srv.owner}
+  return {name: srv.name, ch: srv.ch, ver: srv.ver, owner: srv.owner, yt: srv.yt || ''}
 }
 function syncData(sid) {
   const srv = srvById(sid)
@@ -290,6 +294,7 @@ function connect(srv) {
   on('meta', (c, d) => applyMeta(c.sid, d))
   on('typ', onTyping)
   on('watch', onWatch)
+  on('mus', onMus)
   const fa = room.makeAction('file')
   fa.onReceive = ({byteLength}) => byteLength <= MAX_FILE
   let progT = 0
@@ -304,6 +309,7 @@ function connect(srv) {
   room.onPeerJoin = pid => {
     c.a.hello.send(helloData(c.sid), {target: pid})
     c.a.sync.send(syncData(c.sid), {target: pid})
+    for (const key of Object.keys(S.music)) if (key.startsWith(c.sid + '|') && S.music[key].cur) musSend(key, pid)
   }
   room.onPeerLeave = pid => onLeave(c, pid)
   room.onPeerStream = (stream, pid, meta) => onStream(c, pid, stream, meta)
@@ -353,6 +359,9 @@ function voiceStateChanged(c, pid, prev, st) {
   if (was !== is) {
     beep(is ? 'join' : 'leave')
     if (!is) dropRemote(pid)
+    // Yeni gelene çalan müziği bildir
+    const mk = v.sid + '|' + v.cid
+    if (is && S.music[mk]?.cur) musSend(mk, pid)
   }
   const r = v.remote[pid]
   if (r) {
@@ -391,6 +400,7 @@ function applyMeta(sid, d) {
   srv.name = clamp(d.name, 50) || srv.name
   srv.ch = ch
   srv.ver = +d.ver
+  srv.yt = typeof d.yt === 'string' && /^[A-Za-z0-9_-]{20,80}$/.test(d.yt) ? d.yt : ''
   if (!srv.owner && typeof d.owner === 'string') srv.owner = clamp(d.owner, 40)
   saveServers()
   if (S.view.sid === sid && S.view.cid && !ch.some(x => x.id === S.view.cid)) S.view.cid = firstText(srv)
@@ -637,7 +647,8 @@ const readDataUrl = f => new Promise((res, rej) => { const r = new FileReader();
 // ======================= mesaj render =======================
 function msgHtml(m, prev) {
   const newDay = !prev || dayOf(prev.t) !== dayOf(m.t)
-  const head = newDay || !prev || prev.uid !== m.uid || m.t - prev.t > 7 * 60e3 || m.rp || prev.del
+  const who = x => (x.bot ? 'bot:' : '') + x.uid
+  const head = newDay || !prev || who(prev) !== who(m) || m.t - prev.t > 7 * 60e3 || m.rp || prev.del
   const mine = m.uid === S.me.uid
   const ment = !m.del && !mine && mentionsMe(m.x)
   let h = newDay ? `<div class="day"><span>${fmtDay(m.t)}</span></div>` : ''
@@ -645,8 +656,13 @@ function msgHtml(m, prev) {
   const ua = `data-act="prof" data-uid="${esc(m.uid)}"`
   if (head) {
     if (m.rp) h += `<div class="rp" data-act="jump" data-to="${esc(m.rp.id)}">↱ <b>${esc(m.rp.n)}</b> ${esc(m.rp.x)}</div>`
-    h += avatar(m.n, m.c, '', '', ua)
-    h += `<div class="mh"><span class="un" style="color:${m.c}" ${ua}>${esc(m.n)}</span><span class="ts">${fmtFull(m.t)}</span></div>`
+    if (m.bot) {
+      h += '<div class="av botav">🎵</div>'
+      h += `<div class="mh"><span class="un" style="color:#1db954">Kanka Müzik</span><span class="bottag">BOT</span><span class="ts">${fmtFull(m.t)}</span></div>`
+    } else {
+      h += avatar(m.n, m.c, '', '', ua)
+      h += `<div class="mh"><span class="un" style="color:${m.c}" ${ua}>${esc(m.n)}</span><span class="ts">${fmtFull(m.t)}</span></div>`
+    }
   } else h += `<span class="sts">${fmtTime(m.t)}</span>`
   if (m.del) {
     h += '<div class="tx del">Bu mesaj silindi.</div>'
@@ -676,7 +692,7 @@ function welcomeHtml() {
     return `<div class="welcome">${avatar(u.n, u.c, 's80')}<h1>${esc(u.n)}</h1><p><b>${esc(u.n)}</b> ile olan direkt mesaj geçmişinin başlangıcı.</p></div>`
   }
   const name = srvById(sid)?.ch.find(c => c.id === cid)?.name || ''
-  return `<div class="welcome"><div class="big">#</div><h1>#${esc(name)} kanalına hoş geldin!</h1><p>Bu, #${esc(name)} kanalının başlangıcı.</p></div>`
+  return `<div class="welcome"><div class="big">#</div><h1>#${esc(name)} kanalına hoş geldin!</h1><p>Bu, #${esc(name)} kanalının başlangıcı. 🎵 Müzik için bir ses kanalındayken <code>!play şarkı adı</code> yaz (<code>!help</code>).</p></div>`
 }
 const isAtBottom = el => el.scrollHeight - el.scrollTop - el.clientHeight < 120
 function scrollBottom() { const b = $('#msgs'); b.scrollTop = b.scrollHeight }
@@ -790,11 +806,13 @@ function renderSide() {
     const here = S.voice && S.voice.sid === sid && S.voice.cid === c.id
     h += `<button class="ch${here && S.showStage ? ' on' : ''}" data-act="vch" data-cid="${c.id}"><span class="hash">🔊</span><span class="nm">${esc(c.name)}</span><span class="x" data-act="ch-menu" data-cid="${c.id}" title="Kanal ayarları">⚙</span></button>`
     const us = voiceUsers(sid, c.id)
-    if (us.length) {
+    const ms = S.music[sid + '|' + c.id]
+    if (us.length || ms?.cur) {
       h += '<div class="vusers">'
       for (const u of us) {
         h += `<div class="vu" data-act="prof" data-uid="${esc(u.uid)}">${avatar(u.n, u.c, 's24' + (u.st.spk && !u.st.m ? ' spk' : ''), '', `data-pk="${u.pk}"`)}<span class="nm">${esc(u.n)}</span>${u.st.scr ? '<span class="live">CANLI</span>' : ''}${u.st.cam ? '<span class="ico">📷</span>' : ''}${u.st.d ? '<span class="ico">🔇</span>' : u.st.m ? '<span class="ico">🎙️̸</span>' : ''}</div>`
       }
+      if (ms?.cur) h += `<div class="vu" title="${esc(ms.cur.t)}"><div class="av s24 botav">🎵</div><span class="nm">Kanka Müzik · ${esc(ms.cur.t)}</span>${ms.playing ? '' : '<span class="ico">⏸️</span>'}</div>`
       h += '</div>'
     }
   }
@@ -980,6 +998,7 @@ async function joinVoice(sid, cid) {
     beep('join')
     S.focus = null
     openStage()
+    applyMusic()
   } finally { S.joining = false }
 }
 function leaveVoice(silent) {
@@ -990,10 +1009,12 @@ function leaveVoice(silent) {
     for (const s of Object.values(v.sent[pid])) try { c?.room.removeStream(s, {target: pid}) } catch {}
   }
   stopVad()
-  for (const s of [v.mic, v.cam, v.scr, v.scrPreview]) s?.getTracks().forEach(t => t.stop())
+  for (const s of [v.mic, v.cam, v.scr, v.scrRaw, v.scrPreview]) s?.getTracks().forEach(t => t.stop())
+  stopEcho()
   for (const pid of Object.keys(v.remote)) dropRemote(pid)
   S.voice = null
   clearStage(true)
+  applyMusic()
   c?.a.st.send(stateFor(v.sid))
   if (!silent) beep('leave')
   S.showStage = false
@@ -1155,6 +1176,7 @@ function attachScreenAudio(pid, stream) {
 function dropScreenAudio(pid) {
   const a = S.saudios[pid]
   if (a) { a.srcObject = null; a.remove(); delete S.saudios[pid] }
+  echoSyncRefs()
 }
 function dropRemote(pid) {
   const v = S.voice
@@ -1162,6 +1184,7 @@ function dropRemote(pid) {
   const a = S.audios[pid]
   if (a) { a.srcObject = null; a.remove(); delete S.audios[pid] }
   dropScreenAudio(pid)
+  echoSyncRefs()
   for (const key of [pid + ':u', pid + ':s']) {
     const el = S.tileEls.get(key)
     if (el) { const vid = el.querySelector('video'); if (vid) vid.srcObject = null; el.remove(); S.tileEls.delete(key) }
@@ -1183,6 +1206,8 @@ function applyAudio() {
     a.muted = !!S.st.d
     a.volume = svolOf(uidOfPid(pid))
   }
+  echoSyncRefs()
+  musicVolume()
 }
 function applyMic() {
   const v = S.voice
@@ -1323,6 +1348,7 @@ function goLiveModal() {
       <div class="field"><label>İçerik türü</label>${seg('mode', [['motion', '🎮 Oyun / Video', 'akıcılık öncelikli'], ['detail', '📝 Yazı / Kod', 'netlik öncelikli']])}</div>
       ${live ? '' : switchRow('saudio', s.saudio, '🔊 Oyun / bilgisayar sesini de paylaş')}
       ${live ? '' : '<div class="hint" style="margin-top:0">Oyun sesi için açılan pencerede <b>“Tüm ekran”</b> sekmesini seç ve alttaki <b>“Sistem sesini de paylaş”</b> kutusunu işaretle (Windows, Chrome/Edge). Tarayıcı sekmesi paylaşırken “Sekme sesini de paylaş”ı işaretle. Tek bir pencere paylaşılırken tarayıcılar ses vermez.</div>'}
+      <div class="hint">🖥️ Bu ekranın çözünürlüğü: <b>${Math.round(screen.width * (devicePixelRatio || 1))}×${Math.round(screen.height * (devicePixelRatio || 1))}</b>${screen.height * (devicePixelRatio || 1) >= 2100 ? ' (4K, “Kaynak” 4K yayın yapar)' : '. 4K yayın için 4K ekran gerekir; büyütmek netlik katmaz.'}</div>
       <div class="hint">${hw}<br>“Kaynak”, ekranın kendi çözünürlüğüdür (ör. 1440p, 4K) ve en net görüntüyü verir. Her izleyiciye, ekranında gösterebileceğinden daha büyük görüntü gönderilmez; kimse izlemiyorsa hiç kodlama yapılmaz. 120 FPS'i görmek için izleyicinin ekranı 120 Hz olmalı.</div>
     </div>
     <div class="mf">${live ? '<button class="btn red" id="gl-stop">Yayını durdur</button>' : '<button class="btn sec" id="gl-cancel">Vazgeç</button>'}<button class="btn" id="gl-go">${live ? 'Uygula' : 'Yayına başla'}</button></div>`, root => {
@@ -1380,15 +1406,30 @@ async function startScreen() {
   t.contentHint = s.smode === 'motion' ? 'motion' : 'detail'
   t.addEventListener('ended', stopScreen)
   const at = stream.getAudioTracks()[0]
-  if (at) at.contentHint = 'music'
-  else if (s.saudio) {
+  let send = stream
+  if (at) {
+    at.contentHint = 'music'
+    // Yankı koruması: bu sayfanın çaldığı sohbet seslerini yakalanan sistem sesinden çıkar
+    if (s.echoGuard !== false) {
+      try {
+        echo.guard = await createEchoGuard(actx(), at, refBus())
+        if (echo.guard) {
+          echo.guard.track.contentHint = 'music'
+          send = new MediaStream([t, echo.guard.track])
+          echoSyncRefs()
+        }
+      } catch (e) { echo.guard = null }
+      if (S.voice !== v || v.scr) { stopEcho(); stream.getTracks().forEach(x => x.stop()); return }
+    }
+  } else if (s.saudio) {
     toast('Oyun sesi alınamadı. Ses için paylaşırken “Tüm ekran”ı seçip “Sistem sesini de paylaş” kutusunu işaretle (veya bir sekme paylaşıp “Sekme sesini de paylaş”ı işaretle).', 9000)
   }
   // Kendi önizlememiz düşük FPS/çözünürlüklü bir kopya: tam kaliteyi kendine göstermek boşa GPU harcar
   const pt = t.clone()
   pt.applyConstraints({frameRate: {max: 15}, height: {max: 540}, width: {max: 1296}, resizeMode: 'crop-and-scale'}).catch(() => {})
   v.scrPreview = new MediaStream([pt])
-  v.scr = stream
+  v.scr = send
+  v.scrRaw = stream
   v.watchers = new Set()
   v.levels = {}
   sendState()
@@ -1411,8 +1452,11 @@ function stopScreen() {
   const v = S.voice
   if (!v?.scr) return
   v.scr.getTracks().forEach(t => t.stop())
+  v.scrRaw?.getTracks().forEach(t => t.stop())
   v.scrPreview?.getTracks().forEach(t => t.stop())
+  stopEcho()
   v.scr = null
+  v.scrRaw = null
   v.scrPreview = null
   v.watchers = new Set()
   v.levels = {}
@@ -1420,7 +1464,6 @@ function stopScreen() {
   sendState()
   inv('vbar', 'side', 'stage')
 }
-// Yayıncı tarafı: izleyicinin istediği kalite seviyesini kaydet ve kodlayıcıyı ayarla
 // Yayıncı tarafı: izleyicinin istediği kalite seviyesini kaydet ve kodlayıcıları ayarla
 function onWatch(c, d, pid) {
   const v = S.voice
@@ -1488,6 +1531,52 @@ function updateWatchLevels() {
     }
   }
 }
+// ---------- yankı koruması (ekran paylaşımında sistem sesi) ----------
+// Sayfanın çaldığı tüm sesler (arkadaşların mikrofonu, izlenen yayınların sesi) mono bir
+// referans karışımında toplanır; createEchoGuard bunu yakalanan sistem sesinden çıkarır.
+const echo = {bus: null, srcs: new Map(), guard: null}
+function refBus() {
+  const ac = actx()
+  if (!echo.bus) {
+    echo.bus = ac.createGain()
+    echo.bus.channelCount = 1
+    echo.bus.channelCountMode = 'explicit'
+    echo.bus.channelInterpretation = 'speakers'
+  }
+  return echo.bus
+}
+function echoSyncRefs() {
+  if (!echo.guard || !AC) return
+  const els = new Set([...Object.values(S.audios), ...Object.values(S.saudios)])
+  for (const [el, n] of echo.srcs) {
+    if (!els.has(el) || n.stream !== el.srcObject) {
+      try { n.src.disconnect(); n.g.disconnect() } catch {}
+      echo.srcs.delete(el)
+    }
+  }
+  for (const el of els) {
+    const st = el.srcObject
+    if (!st || !st.getAudioTracks().length) continue
+    let n = echo.srcs.get(el)
+    if (!n) {
+      try {
+        const src = AC.createMediaStreamSource(st)
+        const g = AC.createGain()
+        src.connect(g).connect(echo.bus)
+        n = {src, g, stream: st}
+        echo.srcs.set(el, n)
+      } catch { continue }
+    }
+    n.g.gain.value = el.muted ? 0 : el.volume
+  }
+}
+function stopEcho() {
+  echo.guard?.stop()
+  echo.guard = null
+  for (const n of echo.srcs.values()) try { n.src.disconnect(); n.g.disconnect() } catch {}
+  echo.srcs.clear()
+}
+
 // ---------- canlı yayın istatistikleri ----------
 let statsT = 0
 function startStats() { if (!statsT) statsT = setInterval(pollStats, 2000) }
@@ -1658,6 +1747,283 @@ function renderStage() {
   // Yerleşim oturduktan sonra kalite seviyelerini bildir
   requestAnimationFrame(updateWatchLevels)
 }
+
+// ======================= müzik botu =======================
+// Her ses kanalının bir müzik durumu vardır: sıra, çalan şarkı, konum. Durum P2P yayılır,
+// kanaldaki herkes şarkıyı kendi tarayıcısındaki YouTube oynatıcısıyla senkron çalar.
+const MP = {player: null, ready: null, vid: null, blocked: false, chain: Promise.resolve()}
+const BOT_HELP = `**🎵 Kanka Müzik**, ses kanalındayken herhangi bir metin kanalına yaz:
+\`!play şarkı adı\` veya \`!play YouTube/Spotify linki\`: çalar ya da sıraya ekler
+\`!skip\`: sıradakine geç · \`!pause\` / \`!resume\`: duraklat / devam · \`!stop\`: durdur ve sırayı temizle
+\`!queue\`: sırayı göster · \`!np\`: şu an çalan · \`!remove 2\`: sıradaki 2. şarkıyı çıkar`
+const mPos = st => !st?.cur ? 0 : st.playing ? st.base.p + (performance.now() - st.base.tr) / 1000 : st.base.p
+const myMusicKey = () => S.voice ? S.voice.sid + '|' + S.voice.cid : null
+const newVer = key => Math.max(Date.now() * 1000 + Math.floor(Math.random() * 1000), (S.music[key]?.ver || 0) + 1000)
+function sanitizeItem(x) {
+  if (!x || !isYtId(x.id)) return null
+  return {id: x.id, t: clamp(x.t, 150) || 'Şarkı', by: clamp(x.by, 32), alt: Array.isArray(x.alt) ? x.alt.filter(isYtId).slice(0, 4) : []}
+}
+function musWire(key, lead) {
+  const st = S.music[key]
+  return {vc: key.split('|')[1], ver: st.ver, q: st.q, cur: st.cur, pos: mPos(st), playing: st.playing, lead: !!lead}
+}
+function musSend(key, target, lead) {
+  const c = S.conns[key.split('|')[0]]
+  if (c && S.music[key]) c.a.mus.send(musWire(key, lead), target ? {target} : undefined)
+}
+function onMus(c, d) {
+  if (!d || typeof d.vc !== 'string' || !/^[a-z0-9]{1,20}$/.test(d.vc) || !(+d.ver > 0)) return
+  const key = c.sid + '|' + d.vc
+  const cur = S.music[key]
+  if (cur && !(+d.ver > cur.ver || (d.lead && +d.ver === cur.ver))) return
+  S.music[key] = {
+    ver: +d.ver,
+    q: (Array.isArray(d.q) ? d.q : []).slice(0, 100).map(sanitizeItem).filter(Boolean),
+    cur: sanitizeItem(d.cur),
+    playing: !!d.playing,
+    base: {p: Math.min(86400, Math.max(0, +d.pos || 0)), tr: performance.now()}
+  }
+  if (key === myMusicKey()) applyMusic()
+  inv('side')
+}
+// Durumu değiştir (komut veren taraf): yerelde uygula ve herkese yay
+function setMusic(key, {q, cur, playing, pos}, ver) {
+  S.music[key] = {ver: ver || newVer(key), q, cur, playing, base: {p: pos || 0, tr: performance.now()}}
+  musSend(key)
+  if (key === myMusicKey()) applyMusic()
+  inv('side')
+}
+// Bot cevabı: komutun yazıldığı kanala (arama sürerken kanal değişse bile) gider
+function botSay(text, key = curKey()) {
+  if (!key || key.startsWith('dm|')) return
+  const t = now()
+  const m = {id: rid(12), uid: S.me.uid, n: S.me.name, c: S.me.color, t, u: t, x: clamp(text, 4000), bot: 1}
+  mergeMsg(key, m)
+  if (key === curKey()) appendMsg(m, true)
+  sendWire(key, m, true)
+}
+const fmtDur = sec => { sec = Math.round(sec); return Math.floor(sec / 60) + ':' + pad(sec % 60) }
+
+async function resolveTrack(arg) {
+  const yt = parseYouTube(arg)
+  if (yt) return {id: yt, t: (await ytTitle(yt)) || 'YouTube videosu', alt: []}
+  const sp = parseSpotify(arg)
+  let q = arg
+  if (sp) {
+    if (sp.type !== 'track') throw new Error('Spotify’dan şimdilik yalnızca tek şarkı (track) linki açılabiliyor.')
+    const t = await spotifyTitle(arg).catch(() => null)
+    if (!t) throw new Error('Spotify şarkı bilgisi alınamadı; şarkının adını yazmayı dene.')
+    q = t
+  } else if (/^https?:\/\//i.test(arg)) {
+    throw new Error('Bu link desteklenmiyor. YouTube veya Spotify linki ya da şarkı adı yaz.')
+  }
+  let res
+  try {
+    res = await ytSearch(q, srvById(S.voice.sid)?.yt || '')
+  } catch {
+    throw new Error('Şarkı adıyla arama şu an yapılamadı. YouTube linkini yapıştır (`!play https://youtu.be/…`) ya da sunucu ayarlarına bir YouTube API anahtarı ekle.')
+  }
+  if (!res.length) throw new Error(`“${q}” için sonuç bulunamadı.`)
+  return {id: res[0].id, t: res[0].t, alt: res.slice(1, 5).map(r => r.id)}
+}
+
+async function musicCommand(text) {
+  const body = text.slice(1).trim()
+  const cmd = (body.split(/\s+/)[0] || '').toLowerCase()
+  const arg = body.slice(cmd.length).trim()
+  const C = {play: 'play', p: 'play', 'çal': 'play', cal: 'play', skip: 'skip', s: 'skip', 'geç': 'skip', gec: 'skip', next: 'skip',
+    stop: 'stop', dur: 'stop', leave: 'stop', pause: 'pause', duraklat: 'pause', resume: 'resume', devam: 'resume',
+    queue: 'queue', q: 'queue', 'sıra': 'queue', sira: 'queue', np: 'np', nowplaying: 'np', remove: 'remove', sil: 'remove',
+    help: 'help', 'yardım': 'help', yardim: 'help', komutlar: 'help'}[cmd]
+  if (!C) return
+  const ck = curKey()
+  const say = t => botSay(t, ck)
+  if (C === 'help') return say(BOT_HELP)
+  const v = S.voice
+  if (!v || v.sid !== S.view.sid) return say('🔇 Önce bu sunucuda bir **ses kanalına** katıl, sonra `!play şarkı adı` yaz.')
+  const key = v.sid + '|' + v.cid
+  const st = S.music[key] || {ver: 0, q: [], cur: null, playing: false, base: {p: 0, tr: performance.now()}}
+  switch (C) {
+    case 'play': {
+      if (!arg) {
+        if (st.cur && !st.playing) { setMusic(key, {...st, playing: true, pos: mPos(st)}); return say('▶️ Devam ediliyor.') }
+        return say('Ne çalayım? `!play şarkı adı` ya da `!play link` yaz.')
+      }
+      toast('🎵 Aranıyor: ' + arg)
+      let item
+      try { item = await resolveTrack(arg) } catch (e) { return say('⚠️ ' + e.message) }
+      item.by = S.me.name
+      const now = S.music[key] || st
+      if (!now.cur) {
+        setMusic(key, {q: now.q || [], cur: item, playing: true, pos: 0})
+        return say(`🎶 Şimdi çalıyor: **${item.t}** (ekleyen: ${item.by})`)
+      }
+      setMusic(key, {q: [...now.q, item].slice(0, 100), cur: now.cur, playing: now.playing, pos: mPos(now)})
+      return say(`➕ Sıraya eklendi (#${now.q.length + 1}): **${item.t}**`)
+    }
+    case 'skip':
+      if (!st.cur) return say('Şu an bir şey çalmıyor.')
+      setMusic(key, {q: st.q.slice(1), cur: st.q[0] || null, playing: true, pos: 0})
+      return say(st.q[0] ? `⏭️ Geçildi. Şimdi çalıyor: **${st.q[0].t}**` : '⏭️ Geçildi, sırada şarkı kalmadı.')
+    case 'stop':
+      setMusic(key, {q: [], cur: null, playing: false, pos: 0})
+      return say('⏹️ Müzik durduruldu, sıra temizlendi.')
+    case 'pause':
+      if (!st.cur || !st.playing) return
+      setMusic(key, {...st, playing: false, pos: mPos(st)})
+      return say('⏸️ Duraklatıldı. Devam için `!resume`.')
+    case 'resume':
+      if (!st.cur || st.playing) return
+      setMusic(key, {...st, playing: true, pos: mPos(st)})
+      return say('▶️ Devam ediliyor.')
+    case 'np':
+      return say(st.cur ? `🎶 Şimdi çalıyor: **${st.cur.t}** · ${fmtDur(mPos(st))} (ekleyen: ${st.cur.by})` : 'Şu an bir şey çalmıyor.')
+    case 'queue':
+      if (!st.cur) return say('Sıra boş. `!play şarkı adı` ile başlat.')
+      return say(`🎶 **Şimdi:** ${st.cur.t}\n` + (st.q.length ? st.q.slice(0, 15).map((x, i) => `${i + 1}. ${x.t} (${x.by})`).join('\n') + (st.q.length > 15 ? `\n… ve ${st.q.length - 15} şarkı daha` : '') : 'Sırada başka şarkı yok.'))
+    case 'remove': {
+      const n = parseInt(arg, 10)
+      if (!(n >= 1 && n <= st.q.length)) return say('Hangi şarkı? Örnek: `!remove 2` (numara için `!queue`).')
+      const rm = st.q[n - 1]
+      setMusic(key, {...st, q: st.q.filter((_, i) => i !== n - 1), pos: mPos(st)})
+      return say(`🗑️ Sıradan çıkarıldı: **${rm.t}**`)
+    }
+  }
+}
+
+// ---------- oynatıcı ----------
+function musicVolume() {
+  const p = MP.player
+  if (!p || !MP.isReady) return
+  try {
+    p.setVolume(S.settings.mvol)
+    if (S.st.d) p.mute(); else p.unMute()
+  } catch {}
+}
+function ensurePlayer() {
+  if (MP.ready) return MP.ready
+  MP.ready = loadYouTubeApi().then(YT => new Promise((res, rej) => {
+    const host = $('#mwrap')
+    host.innerHTML = '<div id="mplayer"></div>'
+    const to = setTimeout(() => rej(new Error('YouTube oynatıcısı zaman aşımına uğradı')), 15000)
+    MP.player = new YT.Player('mplayer', {
+      width: 224, height: 126,
+      playerVars: {autoplay: 1, controls: 0, disablekb: 1, playsinline: 1, rel: 0, iv_load_policy: 3, fs: 0, origin: location.origin},
+      events: {
+        onReady: () => { clearTimeout(to); MP.isReady = true; musicVolume(); res(MP.player) },
+        onStateChange: onYtState,
+        onError: onYtError
+      }
+    })
+  }))
+  MP.ready.catch(() => { MP.ready = null })
+  return MP.ready
+}
+function destroyPlayer() {
+  if (!MP.player) return
+  try { MP.player.destroy() } catch {}
+  MP.player = null
+  MP.ready = null
+  MP.isReady = false
+  MP.vid = null
+  MP.blocked = false
+  $('#mwrap').innerHTML = ''
+}
+// Yerel oynatıcıyı, içinde bulunduğum ses kanalının müzik durumuna getir (sıralı çalışır)
+function applyMusic() {
+  MP.chain = MP.chain.then(applyMusicNow).catch(e => toast('Müzik: ' + e.message))
+  return MP.chain
+}
+async function applyMusicNow() {
+  const key = myMusicKey()
+  const st = key && S.music[key]
+  renderMusic()
+  if (!st || !st.cur) { destroyPlayer(); return }
+  const p = await ensurePlayer()
+  const now = S.music[myMusicKey()]
+  if (!now || !now.cur) return
+  const want = mPos(now)
+  if (MP.vid !== now.cur.id) {
+    MP.vid = now.cur.id
+    if (now.playing) p.loadVideoById({videoId: now.cur.id, startSeconds: want}); else p.cueVideoById({videoId: now.cur.id, startSeconds: want})
+    if (now.playing) {
+      // Tarayıcı otomatik oynatmayı engellediyse "başlat" butonu göster
+      clearTimeout(MP.blockT)
+      MP.blockT = setTimeout(() => {
+        const s2 = S.music[myMusicKey()]
+        const ps = MP.player?.getPlayerState?.()
+        MP.blocked = !!(s2?.playing && ps !== 1 && ps !== 3)
+        renderMusic()
+      }, 4000)
+    }
+  } else {
+    try {
+      if (Math.abs(p.getCurrentTime() - want) > 2) p.seekTo(want, true)
+      if (now.playing) p.playVideo(); else p.pauseVideo()
+    } catch {}
+  }
+  musicVolume()
+  renderMusic()
+}
+function amMusicLeader() {
+  return voicePeers().every(pid => selfId < pid)
+}
+function onYtState(e) {
+  if (e.data === 1) {
+    if (MP.blocked) { MP.blocked = false; renderMusic() }
+    // Link başlığı alınamadıysa oynatıcıdan oku
+    const st = S.music[myMusicKey()]
+    const t = MP.player?.getVideoData?.()?.title
+    if (st?.cur && t && st.cur.t === 'YouTube videosu' && st.cur.id === MP.vid) { st.cur.t = clamp(t, 150); renderMusic(); inv('side') }
+  }
+  if (e.data !== 0) return
+  // Şarkı bitti: herkes aynı şekilde sıradakine geçer; lider durumu yayıp konumları hizalar
+  const key = myMusicKey()
+  const st = key && S.music[key]
+  if (!st || !st.cur || st.cur.id !== MP.vid) return
+  S.music[key] = {ver: st.ver + 1, q: st.q.slice(1), cur: st.q[0] || null, playing: true, base: {p: 0, tr: performance.now()}}
+  applyMusic()
+  if (amMusicLeader()) musSend(key, null, true)
+  inv('side')
+}
+function onYtError(e) {
+  const key = myMusicKey()
+  const st = key && S.music[key]
+  if (!st || !st.cur || st.cur.id !== MP.vid) return
+  MP.vid = null
+  // Gömülü oynatılamayan şarkıda (ör. bazı resmi klipler) aramadaki bir sonraki sonucu dene
+  if (st.cur.alt.length) {
+    S.music[key] = {...st, ver: st.ver + 1, cur: {...st.cur, id: st.cur.alt[0], alt: st.cur.alt.slice(1)}, base: {p: 0, tr: performance.now()}}
+  } else {
+    toast(`“${st.cur.t}” oynatılamıyor (kod ${e.data}), geçiliyor.`)
+    S.music[key] = {ver: st.ver + 1, q: st.q.slice(1), cur: st.q[0] || null, playing: true, base: {p: 0, tr: performance.now()}}
+  }
+  applyMusic()
+  musSend(key, null, true)
+  inv('side')
+}
+function renderMusic() {
+  const el = $('#music')
+  const key = myMusicKey()
+  const st = key && S.music[key]
+  if (!st || !st.cur) { el.hidden = true; return }
+  el.hidden = false
+  $('#minfo').innerHTML = `<div class="mt" title="${esc(st.cur.t)}">${esc(st.cur.t)}</div>
+    <div class="msub">ekleyen ${esc(st.cur.by)}${st.q.length ? ` · sırada ${st.q.length} şarkı` : ''}</div>
+    ${MP.blocked ? '<button class="btn full" data-act="m-start" style="margin-top:6px">▶ Müziği başlat</button>' : ''}
+    <div class="mctl"><button data-act="m-toggle" title="${st.playing ? 'Duraklat' : 'Devam'}">${st.playing ? '⏸️' : '▶️'}</button><button data-act="m-skip" title="Geç">⏭️</button><button data-act="m-stop" title="Durdur">⏹️</button><input type="range" min="0" max="100" value="${S.settings.mvol}" id="mvol" title="Müzik sesi (yalnızca sende)"></div>`
+}
+function musicButton(act) {
+  const key = myMusicKey()
+  const st = key && S.music[key]
+  if (!st || !st.cur) return
+  if (act === 'm-start') { MP.blocked = false; try { MP.player.playVideo() } catch {} renderMusic(); return }
+  if (act === 'm-toggle') setMusic(key, {...st, playing: !st.playing, pos: mPos(st)})
+  if (act === 'm-skip') setMusic(key, {q: st.q.slice(1), cur: st.q[0] || null, playing: true, pos: 0})
+  if (act === 'm-stop') setMusic(key, {q: [], cur: null, playing: false, pos: 0})
+}
+// Kayma düzeltmesi: çalarken ara sıra konumu kontrol et
+setInterval(() => { const st = S.music[myMusicKey()]; if (st?.playing && MP.isReady && !document.hidden) applyMusic() }, 15000)
 
 // ======================= modallar / popoverlar =======================
 function modal(html, onMount) {
@@ -1842,10 +2208,16 @@ function channelModal(srv, type, ch) {
   })
 }
 function renameServerModal(srv) {
-  modal(`<div class="mh"><h2>Sunucu ayarları</h2></div><form class="mb" id="rs"><div class="field"><label>Sunucu adı</label><input class="inp" name="n" maxlength="50" required value="${esc(srv.name)}"></div><button class="btn full">Kaydet</button></form>`, root => {
+  modal(`<div class="mh"><h2>Sunucu ayarları</h2></div><form class="mb" id="rs"><div class="field"><label>Sunucu adı</label><input class="inp" name="n" maxlength="50" required value="${esc(srv.name)}"></div>
+    <div class="field"><label>Müzik botu: YouTube API anahtarı (isteğe bağlı)</label><input class="inp" name="yt" maxlength="80" placeholder="AIza…" value="${esc(srv.yt || '')}">
+    <div class="hint">\`!play şarkı adı\` aramasını en güvenilir hâle getirir; linkler anahtarsız da çalışır. Ücretsiz almak için: console.cloud.google.com → yeni proje → “YouTube Data API v3”ü etkinleştir → Kimlik bilgileri → API anahtarı oluştur. Anahtar sunucudaki herkesle paylaşılır, bir kişinin girmesi yeter.</div></div>
+    <button class="btn full">Kaydet</button></form>`, root => {
     root.querySelector('#rs').addEventListener('submit', e => {
       e.preventDefault()
       srv.name = clamp(e.target.n.value.trim(), 50) || srv.name
+      const yt = e.target.yt.value.trim()
+      if (yt && !/^[A-Za-z0-9_-]{20,80}$/.test(yt)) { toast('YouTube API anahtarı geçersiz görünüyor.'); return }
+      srv.yt = yt
       pushMeta(srv)
       closeModal()
     })
@@ -1890,6 +2262,7 @@ async function settingsModal(tab = 'profile') {
         ${sw('ptt', s.ptt, 'Bas-konuş (Push-to-talk)')}
         <div class="row"><span>Bas-konuş tuşu</span><button type="button" class="btn sec" id="pttk" style="border:1px solid var(--line)">${esc(keyName(s.pttKey))}</button></div>
         ${sw('sounds', s.sounds, 'Giriş/çıkış sesleri')}
+        ${sw('echoGuard', s.echoGuard !== false, 'Yayın sesinden sohbet seslerini temizle (yankı koruması)')}
       </div>
       <div data-pane="video">
         <div class="field"><label>Kamera</label><select class="inp" name="cam">${opts('videoinput', s.cam)}</select></div>
@@ -1959,7 +2332,7 @@ async function settingsModal(tab = 'profile') {
       LS.set('kd_me', S.me)
       Object.assign(s, {
         mic: f.mic.value, cam: f.cam.value, sens: +f.sens.value, ns: f.ns.checked, ec: f.ec.checked, agc: f.agc.checked,
-        ptt: f.ptt.checked, pttKey, sounds: f.sounds.checked, vq: f.vq.value, notif: f.notif.checked, members: f.members.checked
+        ptt: f.ptt.checked, pttKey, sounds: f.sounds.checked, echoGuard: f.echoGuard.checked, vq: f.vq.value, notif: f.notif.checked, members: f.members.checked
       })
       saveSettings()
       if (s.notif && 'Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(() => {})
@@ -2077,6 +2450,7 @@ function onClick(e) {
     case 'srv': go(t.dataset.sid); break
     case 'new-srv': newServerModal(); break
     case 'install': installApp(); break
+    case 'm-start': case 'm-toggle': case 'm-skip': case 'm-stop': musicButton(act); break
     case 'join-srv': joinServerModal(); break
     case 'ch': if (!e.target.closest('[data-act="ch-menu"]')) go(S.view.sid, t.dataset.cid); break
     case 'ch-menu': {
@@ -2191,6 +2565,7 @@ function submit() {
   i.value = ''
   autoGrow()
   postMsg(newMsg({x}))
+  if (x.startsWith('!') && S.view.sid) musicCommand(x)
 }
 function bind() {
   document.addEventListener('click', onClick)
@@ -2204,6 +2579,13 @@ function bind() {
     }
   })
   i.addEventListener('input', () => { autoGrow(); if (i.value) sendTyping() })
+  $('#music').addEventListener('input', e => {
+    if (e.target.id !== 'mvol') return
+    S.settings.mvol = +e.target.value
+    musicVolume()
+    clearTimeout(S.mvolT)
+    S.mvolT = setTimeout(saveSettings, 500)
+  })
   i.addEventListener('paste', e => {
     const files = [...(e.clipboardData?.files || [])]
     if (files.length) { e.preventDefault(); sendFiles(files) }
