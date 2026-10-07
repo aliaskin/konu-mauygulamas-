@@ -1,5 +1,7 @@
 # Kanka Chat
 
+**👉 Uygulamayı aç: https://aliaskin.github.io/konu-mauygulamas-/**
+
 Tarayıcıda çalışan, Discord benzeri bir sohbet uygulaması. Kurulum, hesap ya da sunucu gerektirmez.
 Mesajlar, ses ve görüntü doğrudan arkadaşlarının cihazlarına (P2P, WebRTC) uçtan uca şifreli gider.
 
@@ -27,11 +29,8 @@ Mesajlar, ses ve görüntü doğrudan arkadaşlarının cihazlarına (P2P, WebRT
 
 ## Yayınlama (GitHub Pages)
 
-Derlenmiş uygulama `docs/index.html` dosyasındadır. Ücretsiz yayınlamak için:
-
-1. Repo ayarları → **General** → en altta *Change visibility* → **Public** (ücretsiz hesapta Pages için gerekli)
-2. Repo ayarları → **Pages** → *Source: Deploy from a branch* → dal olarak bu dalı (veya `main`) ve klasör olarak **`/docs`** seç → **Save**
-3. 1-2 dakika sonra uygulama `https://<kullanıcı-adın>.github.io/<repo-adı>/` adresinde açılır
+Uygulama GitHub Pages ile `gh-pages` dalından yayınlanır. `src/` altında yapılan her değişiklik
+push edildiğinde `.github/workflows/pages.yml` uygulamayı derleyip `gh-pages` dalını otomatik günceller.
 
 HTTPS veren herhangi bir statik barındırma (Netlify, Cloudflare Pages, Vercel…) da olur: tek yapman gereken `docs/index.html` dosyasını yüklemek.
 

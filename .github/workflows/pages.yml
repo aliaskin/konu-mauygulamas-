@@ -1,0 +1,26 @@
+# docs/ içeriğini gh-pages dalına kopyalar; GitHub Pages oradan yayınlar.
+name: Yayınla
+on:
+  push:
+    branches: [claude/discord-like-chat-app-dzvaz5, main]
+    paths: [src/**, build.mjs, package.json, package-lock.json]
+  workflow_dispatch:
+permissions:
+  contents: write
+concurrency: pages
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+      - uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./docs
+          publish_branch: gh-pages
