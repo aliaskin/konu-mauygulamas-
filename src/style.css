@@ -335,3 +335,4 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .botav { background: #1db954 !important; font-size: 18px; }
 .av.s24.botav { font-size: 12px; }
 .bottag { background: var(--accent); color: #fff; font-size: 10px; font-weight: 700; padding: 1px 4px; border-radius: 3px; align-self: center; }
+.linkbtn { color: #00a8fc; font-size: inherit; text-decoration: underline; }

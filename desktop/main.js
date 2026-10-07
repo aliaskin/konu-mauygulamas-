@@ -7,7 +7,7 @@
 //  - sistem tepsisi, Windows ile başlama, görev çubuğu rozeti, arka planda yavaşlamama
 const {
   app, BrowserWindow, Tray, Menu, nativeImage, globalShortcut, ipcMain, session,
-  desktopCapturer, shell, screen, powerSaveBlocker
+  desktopCapturer, shell, screen, powerSaveBlocker, webFrameMain
 } = require('electron')
 const path = require('node:path')
 const fs = require('node:fs')
@@ -38,7 +38,7 @@ const canAutoStart = process.platform === 'win32' || process.platform === 'darwi
 
 // ---------- tercihler (userData/desktop.json) ----------
 const PREFS_FILE = path.join(app.getPath('userData'), 'desktop.json')
-const prefs = {closeToTray: true, hotkeys: true, bounds: null, maximized: false, trayTipShown: false}
+const prefs = {closeToTray: true, hotkeys: true, adblock: true, bounds: null, maximized: false, trayTipShown: false}
 try { Object.assign(prefs, JSON.parse(fs.readFileSync(PREFS_FILE, 'utf8'))) } catch {}
 let prefsT = null
 function savePrefs() {
@@ -115,6 +115,7 @@ function createWindow() {
   })
 
   const wc = win.webContents
+  setupAdBlock(wc)
   // Yalnızca uygulamanın kendi adresi pencerede açılır; diğer linkler varsayılan tarayıcıda
   wc.setWindowOpenHandler(({url}) => { openExternal(url); return {action: 'deny'} })
   wc.on('will-navigate', (e, url) => {
@@ -178,6 +179,8 @@ function setupSession() {
     cb(originOf(details.requestingUrl || wc.getURL()) === APP_ORIGIN && ALLOWED.has(perm))
   })
   ses.setPermissionCheckHandler((wc, perm, origin) => originOf(origin) === APP_ORIGIN && ALLOWED.has(perm))
+  // Reklam ve reklam izleme adresleri (yalnızca bu adreslerde çağrılır, diğer trafiğe dokunmaz)
+  ses.webRequest.onBeforeRequest({urls: AD_URLS}, (d, cb) => cb({cancel: !!prefs.adblock}))
   // Web sayfası getDisplayMedia çağırınca kendi seçicimizi aç
   ses.setDisplayMediaRequestHandler(async (request, callback) => {
     // Geri çağrı yalnızca bir kez çağrılabilir; reddetmek için null (sayfa AbortError alır)
@@ -441,6 +444,7 @@ ipcMain.on('app:setPref', (e, p) => {
   if (p.key === 'autoStart') setAutoStart(!!p.value)
   else if (p.key === 'closeToTray') { prefs.closeToTray = !!p.value; savePrefs(); updateTray() }
   else if (p.key === 'hotkeys') { prefs.hotkeys = !!p.value; savePrefs(); registerHotkeys() }
+  else if (p.key === 'adblock') { prefs.adblock = !!p.value; savePrefs() }
 })
 ipcMain.handle('app:prefs', e => {
   if (!fromApp(e)) return null
@@ -451,6 +455,7 @@ ipcMain.handle('app:prefs', e => {
     autoStartSupported: canAutoStart,
     closeToTray: prefs.closeToTray,
     hotkeys: prefs.hotkeys,
+    adblock: prefs.adblock,
     hotkeyNames: HOTKEYS,
     globalPtt: !!loadHook(),
     updateReady,
@@ -477,4 +482,85 @@ function setupUpdates() {
   const check = () => { try { updater.checkForUpdates().catch(() => {}) } catch {} }
   setTimeout(check, 15000)
   setInterval(check, 6 * 3600 * 1000)
+}
+
+// ---------- müzik botunda YouTube reklamlarını engelleme ----------
+// Reklamlar normal videoyla aynı sunuculardan geldiği için yalnızca ağ engellemesi yetmez. YouTube
+// oynatıcısı her şarkı için sunucudan bir "player" yanıtı alır; reklam yerleşimleri bu yanıttadır.
+// Ana süreç, YouTube çerçevesinin içine (köprü açmadan) bu yanıtlardaki reklam alanlarını silen küçük
+// bir betik yerleştirir; oynatıcı reklam olmadığını düşünüp doğrudan şarkıyı çalar.
+const AD_URLS = [
+  '*://*.doubleclick.net/*', '*://*.googlesyndication.com/*', '*://*.googleadservices.com/*',
+  '*://*.youtube.com/api/stats/ads*', '*://*.youtube.com/pagead/*', '*://*.youtube.com/get_midroll_*',
+  '*://*.youtube-nocookie.com/api/stats/ads*', '*://*.youtube-nocookie.com/pagead/*'
+]
+const YT_HOST = /(^|\.)youtube(-nocookie)?\.com$/i
+// YouTube çerçevesinin ana dünyasında çalışır (toString ile enjekte edilir)
+function noAdsInFrame() {
+  if (window.__kankaNoAds) return
+  window.__kankaNoAds = true
+  const KEYS = ['adPlacements', 'adSlots', 'playerAds', 'adBreakHeartbeatParams', 'adBreakParams']
+  const strip = o => {
+    if (!o || typeof o !== 'object') return o
+    for (const k of KEYS) if (k in o) { try { delete o[k] } catch (e) {} }
+    if (o.playerResponse && typeof o.playerResponse === 'object') strip(o.playerResponse)
+    if (Array.isArray(o)) for (const x of o) if (x && typeof x === 'object' && (x.playerResponse || x.adPlacements)) strip(x)
+    return o
+  }
+  const isPlayer = u => /\/youtubei\/v1\/player/.test(String(u && u.url ? u.url : u))
+  const parse = JSON.parse
+  JSON.parse = new Proxy(parse, {apply(t, self, args) { const r = Reflect.apply(t, self, args); try { strip(r) } catch (e) {} return r }})
+  const rjson = Response.prototype.json
+  Response.prototype.json = new Proxy(rjson, {apply(t, self, args) { return Reflect.apply(t, self, args).then(r => { try { strip(r) } catch (e) {} return r }) }})
+  // player yanıtını metin olarak okuyanlar için: yanıtı temizlenmiş JSON ile değiştir
+  const ofetch = window.fetch
+  window.fetch = new Proxy(ofetch, {apply(t, self, args) {
+    const p = Reflect.apply(t, self, args)
+    if (!isPlayer(args[0])) return p
+    return p.then(res => res.clone().text().then(txt => {
+      try {
+        const clean = JSON.stringify(strip(parse(txt)))
+        const out = new Response(clean, {status: res.status, statusText: res.statusText, headers: res.headers})
+        try { Object.defineProperty(out, 'url', {value: res.url}) } catch (e) {}
+        return out
+      } catch (e) { return res }
+    }).catch(() => res))
+  }})
+  // XHR ile alınan player yanıtları
+  const XP = XMLHttpRequest.prototype
+  const oopen = XP.open
+  XP.open = function (m, url) { this.__kankaPlayer = isPlayer(url); return oopen.apply(this, arguments) }
+  for (const prop of ['responseText', 'response']) {
+    const d = Object.getOwnPropertyDescriptor(XP, prop)
+    if (!d || !d.get) continue
+    Object.defineProperty(XP, prop, {configurable: true, enumerable: d.enumerable, get() {
+      const v = d.get.call(this)
+      if (!this.__kankaPlayer || this.readyState !== 4) return v
+      try { return typeof v === 'string' ? JSON.stringify(strip(parse(v))) : strip(v) } catch (e) { return v }
+    }})
+  }
+  // Sayfaya gömülü ilk oynatıcı verisi
+  for (const name of ['ytInitialPlayerResponse', 'playerResponse']) {
+    let v = window[name]
+    if (v) strip(v)
+    try { Object.defineProperty(window, name, {configurable: true, get: () => v, set: x => { v = strip(x) }}) } catch (e) {}
+  }
+}
+const NOADS_JS = `(${noAdsInFrame.toString()})()`
+function setupAdBlock(wc) {
+  const inject = frame => {
+    if (!prefs.adblock || !frame) return
+    try {
+      if (frame.detached || frame === wc.mainFrame) return
+      const host = new URL(frame.url || frame.origin).hostname
+      if (!YT_HOST.test(host)) return
+      frame.executeJavaScript(NOADS_JS).catch(() => {})
+    } catch {}
+  }
+  // Çerçeve oluşunca ve her gezinmede (YouTube çerçevesi farklı süreçte açılır) yerleştir; betik tekrar çalışmayı yok sayar
+  wc.on('frame-created', (_e, d) => { if (d && d.frame) d.frame.on('dom-ready', () => inject(d.frame)) })
+  wc.on('did-frame-navigate', (_e, _url, _code, _status, isMain, pid, rid) => {
+    if (isMain) return
+    try { inject(webFrameMain.fromId(pid, rid)) } catch {}
+  })
 }

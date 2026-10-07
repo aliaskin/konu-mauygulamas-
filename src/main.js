@@ -1791,7 +1791,8 @@ const BOT_HELP = `**🎵 Kanka Müzik**, ses kanalındayken herhangi bir metin k
 \`!play şarkı adı\` veya \`!play YouTube/Spotify linki\`: çalar ya da sıraya ekler
 \`!skip\`: sıradakine geç · \`!pause\` / \`!resume\`: duraklat / devam · \`!stop\`: durdur ve sırayı temizle
 \`!queue\`: sırayı göster · \`!np\`: şu an çalan · \`!remove 2\`: sıradaki 2. şarkıyı çıkar
-\`!ses 50\`: bot sesini herkes için ayarla (0-100). Kendi duyduğun sesi müzik panelindeki kaydırıcıdan ayarla.`
+\`!ses 50\`: bot sesini herkes için ayarla (0-100). Kendi duyduğun sesi müzik panelindeki kaydırıcıdan ayarla.
+Reklamsız dinlemek için: Windows uygulaması reklamları kendisi engeller; tarayıcıda uBlock Origin eklentisi de işe yarar.`
 const mPos = st => !st?.cur ? 0 : st.playing ? st.base.p + (performance.now() - st.base.tr) / 1000 : st.base.p
 const myMusicKey = () => S.voice ? S.voice.sid + '|' + S.voice.cid : null
 const newVer = key => Math.max(Date.now() * 1000 + Math.floor(Math.random() * 1000), (S.music[key]?.ver || 0) + 1000)
@@ -2061,6 +2062,7 @@ function renderMusic() {
     ${MP.blocked ? '<button class="btn full" data-act="m-start" style="margin-top:6px">▶ Müziği başlat</button>' : ''}
     <div class="mctl"><button data-act="m-toggle" title="${st.playing ? 'Duraklat' : 'Devam'}">${st.playing ? '⏸️' : '▶️'}</button><button data-act="m-skip" title="Sıradakine geç">⏭️</button><button data-act="m-stop" title="Durdur ve sırayı temizle">⏹️</button></div>
     <div class="mvolrow"><button data-act="m-mute" title="${muted ? 'Sesi aç' : 'Sustur'}">${muted ? '🔇' : S.settings.mvol < 40 ? '🔉' : '🔊'}</button><input type="range" min="0" max="100" value="${S.settings.mvol}" id="mvol" aria-label="Bot sesi"><span id="mvolv">%${S.settings.mvol}</span></div>
+    ${DESK ? '' : '<div class="mhint">Reklam mı geldi? <button class="linkbtn" data-act="settings" data-tab="desktop">Windows uygulaması</button> reklamları engeller (ya da uBlock Origin eklentisi).</div>'}
     <div class="mhint">Bot sesi (sadece senin duyduğun)${(st.vol ?? 100) !== 100 ? ` · kanal sesi %${st.vol} (!ses)` : ''}</div>`
   startMusicClock()
 }
@@ -2365,12 +2367,14 @@ async function settingsModal(tab = 'profile') {
         <label class="row"><span>Bilgisayar açılınca başlat (arka planda)</span><span class="sw"><input type="checkbox" id="d-auto"><i></i></span></label>
         <label class="row"><span>Kapatınca sistem tepsisine küçült</span><span class="sw"><input type="checkbox" id="d-tray"><i></i></span></label>
         <label class="row"><span>Genel kısayollar: <b>Ctrl+Shift+M</b> mikrofon, <b>Ctrl+Shift+D</b> sağırlaştır</span><span class="sw"><input type="checkbox" id="d-keys"><i></i></span></label>
+        <label class="row" hidden id="d-ads-row"><span>Müzik botunda YouTube reklamlarını engelle</span><span class="sw"><input type="checkbox" id="d-ads"><i></i></span></label>
         <div class="hint" id="d-info">Bas-konuş tuşu (Ses sekmesi) bu uygulamada oyun öndeyken de çalışır. Ekran paylaşırken bilgisayar sesi otomatik alınır.</div>` : `
         <p class="hint" style="font-size:14px">Kanka Chat'in Windows uygulaması tarayıcının yapamadıklarını ekler:</p>
         <ul class="hint" style="font-size:13px;line-height:1.7;padding-left:18px">
           <li><b>Bas-konuş oyun içindeyken de çalışır</b> (klavye tuşu veya fare yan tuşu)</li>
           <li>Oyundayken <b>Ctrl+Shift+M</b> ile mikrofon, <b>Ctrl+Shift+D</b> ile sağırlaştırma</li>
           <li>Ekran paylaşırken oyun sesi kutucuk işaretlemeden otomatik alınır</li>
+          <li>Müzik botunda <b>YouTube reklamları engellenir</b></li>
           <li>Sistem tepsisi, bilgisayarla başlama, görev çubuğunda bildirim rozeti</li>
           <li>Hep güncel: arayüz her açılışta en son sürümle yüklenir</li>
         </ul>
@@ -2434,6 +2438,8 @@ async function settingsModal(tab = 'profile') {
         if (pr.autoStartSupported === false) root.querySelector('#d-auto').closest('.row').hidden = true
         root.querySelector('#d-tray').checked = !!pr.closeToTray
         root.querySelector('#d-keys').checked = !!pr.hotkeys
+        // Eski uygulama sürümleri reklam engellemeyi bilmez: anahtar yalnızca destekleniyorsa görünür
+        if ('adblock' in pr) { root.querySelector('#d-ads-row').hidden = false; root.querySelector('#d-ads').checked = !!pr.adblock }
         if (!pr.globalPtt) root.querySelector('#d-info').textContent = 'Genel bas-konuş bu sistemde kullanılamıyor; bas-konuş yalnızca pencere öndeyken çalışır.'
         if (pr.version) root.querySelector('#d-info').textContent += ` Uygulama sürümü ${pr.version}.`
         if (pr.updateReady) root.querySelector('#d-info').textContent += ` Yeni sürüm (${pr.updateReady}) indirildi; uygulama kapanınca kurulacak.`
@@ -2441,6 +2447,7 @@ async function settingsModal(tab = 'profile') {
       root.querySelector('#d-auto').addEventListener('change', e => DESK.setPref('autoStart', e.target.checked))
       root.querySelector('#d-tray').addEventListener('change', e => DESK.setPref('closeToTray', e.target.checked))
       root.querySelector('#d-keys').addEventListener('change', e => DESK.setPref('hotkeys', e.target.checked))
+      root.querySelector('#d-ads').addEventListener('change', e => DESK.setPref('adblock', e.target.checked))
     }
     root.querySelector('#acc-code').value = accountCode()
     root.querySelector('#acc-copy').addEventListener('click', () => copy(accountCode()))

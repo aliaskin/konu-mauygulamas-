@@ -40,6 +40,7 @@ Tarayıcının yapamadıklarını ekler:
 - **Bas-konuş oyun içindeyken de çalışır**: klavye tuşu veya fare yan tuşu (Ayarlar → Ses → Bas-konuş)
 - **Genel kısayollar**: oyundayken `Ctrl+Shift+M` mikrofon, `Ctrl+Shift+D` sağırlaştır
 - **Kendi ekran seçicisi**: oyun sesi kutucuk işaretlemeden otomatik alınır (Windows), sohbet sesleri yankı korumasıyla temizlenir
+- **Müzik botunda YouTube reklamları engellenir** (Ayarlar → Masaüstü'den kapatılabilir). Tarayıcıda engellemek için uBlock Origin eklentisi
 - Sistem tepsisi (kapatınca arka planda çalışır), bilgisayar açılınca başlama, görev çubuğunda bahsetme rozeti
 - Küçültülünce yavaşlamaz; dizüstülerde yayın için harici ekran kartını kullanır
 - **Hep güncel**: arayüz her açılışta web sürümünden yüklenir, yeni özellikler yeniden kurmadan gelir
