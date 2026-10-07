@@ -444,7 +444,7 @@ ipcMain.on('app:setPref', (e, p) => {
   if (p.key === 'autoStart') setAutoStart(!!p.value)
   else if (p.key === 'closeToTray') { prefs.closeToTray = !!p.value; savePrefs(); updateTray() }
   else if (p.key === 'hotkeys') { prefs.hotkeys = !!p.value; savePrefs(); registerHotkeys() }
-  else if (p.key === 'adblock') { prefs.adblock = !!p.value; savePrefs() }
+  else if (p.key === 'adblock') { prefs.adblock = !!p.value; savePrefs(); applyAdBlockToOpenFrames() }
 })
 ipcMain.handle('app:prefs', e => {
   if (!fromApp(e)) return null
@@ -500,8 +500,10 @@ function noAdsInFrame() {
   if (window.__kankaNoAds) return
   window.__kankaNoAds = true
   const KEYS = ['adPlacements', 'adSlots', 'playerAds', 'adBreakHeartbeatParams', 'adBreakParams']
+  // Ayar kapatılınca açık çerçevede de etkisiz kalsın diye her seferinde bakılır
+  const off = () => window.__kankaNoAdsOff === true
   const strip = o => {
-    if (!o || typeof o !== 'object') return o
+    if (off() || !o || typeof o !== 'object') return o
     for (const k of KEYS) if (k in o) { try { delete o[k] } catch (e) {} }
     if (o.playerResponse && typeof o.playerResponse === 'object') strip(o.playerResponse)
     if (Array.isArray(o)) for (const x of o) if (x && typeof x === 'object' && (x.playerResponse || x.adPlacements)) strip(x)
@@ -516,7 +518,7 @@ function noAdsInFrame() {
   const ofetch = window.fetch
   window.fetch = new Proxy(ofetch, {apply(t, self, args) {
     const p = Reflect.apply(t, self, args)
-    if (!isPlayer(args[0])) return p
+    if (off() || !isPlayer(args[0])) return p
     return p.then(res => res.clone().text().then(txt => {
       try {
         const clean = JSON.stringify(strip(parse(txt)))
@@ -535,7 +537,7 @@ function noAdsInFrame() {
     if (!d || !d.get) continue
     Object.defineProperty(XP, prop, {configurable: true, enumerable: d.enumerable, get() {
       const v = d.get.call(this)
-      if (!this.__kankaPlayer || this.readyState !== 4) return v
+      if (off() || !this.__kankaPlayer || this.readyState !== 4) return v
       try { return typeof v === 'string' ? JSON.stringify(strip(parse(v))) : strip(v) } catch (e) { return v }
     }})
   }
@@ -547,15 +549,20 @@ function noAdsInFrame() {
   }
 }
 const NOADS_JS = `(${noAdsInFrame.toString()})()`
+const isYtFrame = (wc, f) => { try { return f !== wc.mainFrame && !f.detached && YT_HOST.test(new URL(f.url || f.origin).hostname) } catch { return false } }
+// Ayar değişince o an açık YouTube çerçevelerine de hemen uygula (oynatıcı şarkılar arasında yeniden yüklenmez)
+function applyAdBlockToOpenFrames() {
+  if (!win || win.isDestroyed()) return
+  const wc = win.webContents
+  for (const f of wc.mainFrame.framesInSubtree) {
+    if (!isYtFrame(wc, f)) continue
+    f.executeJavaScript(prefs.adblock ? `window.__kankaNoAdsOff=false;${NOADS_JS}` : 'window.__kankaNoAdsOff=true').catch(() => {})
+  }
+}
 function setupAdBlock(wc) {
   const inject = frame => {
-    if (!prefs.adblock || !frame) return
-    try {
-      if (frame.detached || frame === wc.mainFrame) return
-      const host = new URL(frame.url || frame.origin).hostname
-      if (!YT_HOST.test(host)) return
-      frame.executeJavaScript(NOADS_JS).catch(() => {})
-    } catch {}
+    if (!prefs.adblock || !frame || !isYtFrame(wc, frame)) return
+    frame.executeJavaScript(NOADS_JS).catch(() => {})
   }
   // Çerçeve oluşunca ve her gezinmede (YouTube çerçevesi farklı süreçte açılır) yerleştir; betik tekrar çalışmayı yok sayar
   wc.on('frame-created', (_e, d) => { if (d && d.frame) d.frame.on('dom-ready', () => inject(d.frame)) })
