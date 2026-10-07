@@ -73,6 +73,9 @@ HTTPS veren herhangi bir statik barındırma (Netlify, Cloudflare Pages, Vercel�
   YouTube oynatıcısının (müzik botu) sesi tarayıcı güvenliği gereği yakalanamaz; müzik çalarken sistem sesini paylaşırsan
   müzik yayında da duyulabilir.
 
+- **Fare imleci**: “Fare imlecini yayında gösterme” açıkken tarayıcıdan imleci yakalamaması istenir. Bunu henüz desteklemeyen
+  tarayıcılarda (ör. Chrome 141) oyunda fare ortada görünürse oyunun görüntü modunu **Kenarlıksız / Pencereli tam ekran** yap:
+  bu modda oyun imleci kendisi gizler ve yayında da görünmez.
 - **Oyun sesi**: paylaşım penceresinde **“Tüm ekran”**ı seçip **“Sistem sesini de paylaş”**ı işaretle (Windows'ta Chrome/Edge).
   Sekme paylaşırken “Sekme sesini de paylaş”. Tarayıcılar tek bir pencere paylaşılırken ses vermez; macOS'ta sistem sesi
   tarayıcı ve işletim sistemi sürümüne bağlıdır.

@@ -56,7 +56,7 @@ const S = {
   me: LS.get('kd_me', null),
   settings: Object.assign({
     ns: true, ec: true, agc: true, ptt: false, pttKey: 'KeyV', sens: 8, vq: 'med',
-    sres: 0, sfps: 0, smode: 'motion', saudio: true, sv: 2, echoGuard: true, mvol: 40,
+    sres: 0, sfps: 0, smode: 'motion', saudio: true, sv: 2, echoGuard: true, mvol: 40, scursor: true,
     mic: '', cam: '', sounds: true, notif: false, members: true
   }, LS.get('kd_set', {})),
   servers: LS.get('kd_servers', []),
@@ -1325,10 +1325,13 @@ function screenConstraints() {
   const fps = scrFps()
   // resizeMode açıkça verilmeli: Chrome applyConstraints'te varsayılanı 'none' yapıp boyut sınırını yok sayıyor
   const c = {frameRate: {ideal: fps, max: fps}, resizeMode: 'crop-and-scale'}
+  // Fare imlecini yayına çizme (destekleyen tarayıcılarda ek yük olmadan uygulanır)
+  if (S.settings.scursor) c.cursor = 'never'
   // 0 = kaynak çözünürlük: ekran neyse o (1440p, 4K…), hiç küçültme yok
   if (h) Object.assign(c, {height: {max: h}, width: {max: Math.round(h * 2.4)}})
   return c
 }
+const cursorSupported = () => { try { return !!navigator.mediaDevices.getSupportedConstraints().cursor } catch { return false } }
 const switchRow = (name, on, label) => `<label class="row"><span>${label}</span><span class="sw"><input type="checkbox" name="${name}"${on ? ' checked' : ''}><i></i></span></label>`
 function goLiveModal() {
   const v = S.voice
@@ -1346,6 +1349,8 @@ function goLiveModal() {
       <div class="field"><label>Çözünürlük</label>${seg('res', [[0, 'Kaynak', 'en net'], [2160, '4K'], [1440, '1440p'], [1080, '1080p'], [720, '720p']])}</div>
       <div class="field"><label>Kare hızı</label>${seg('fps', [[30, '30 FPS'], [60, '60 FPS'], [120, '120 FPS']])}</div>
       <div class="field"><label>İçerik türü</label>${seg('mode', [['motion', '🎮 Oyun / Video', 'akıcılık öncelikli'], ['detail', '📝 Yazı / Kod', 'netlik öncelikli']])}</div>
+      ${switchRow('scursor', s.scursor, '🖱️ Fare imlecini yayında gösterme')}
+      ${cursorSupported() ? '' : '<div class="hint" style="margin-top:0">Bu tarayıcı imleci yayından henüz kendisi kaldıramıyor. Oyunda fare ortada görünüyorsa oyunun görüntü ayarını <b>“Kenarlıksız” / “Pencereli tam ekran”</b> (Borderless / Windowed Fullscreen) yap: bu modda oyun imleci kendisi gizler, yayında da görünmez. Nişangâh etkilenmez.</div>'}
       ${live ? '' : switchRow('saudio', s.saudio, '🔊 Oyun / bilgisayar sesini de paylaş')}
       ${live ? '' : '<div class="hint" style="margin-top:0">Oyun sesi için açılan pencerede <b>“Tüm ekran”</b> sekmesini seç ve alttaki <b>“Sistem sesini de paylaş”</b> kutusunu işaretle (Windows, Chrome/Edge). Tarayıcı sekmesi paylaşırken “Sekme sesini de paylaş”ı işaretle. Tek bir pencere paylaşılırken tarayıcılar ses vermez.</div>'}
       <div class="hint">🖥️ Bu ekranın çözünürlüğü: <b>${Math.round(screen.width * (devicePixelRatio || 1))}×${Math.round(screen.height * (devicePixelRatio || 1))}</b>${screen.height * (devicePixelRatio || 1) >= 2100 ? ' (4K, “Kaynak” 4K yayın yapar)' : '. 4K yayın için 4K ekran gerekir; büyütmek netlik katmaz.'}</div>
@@ -1366,6 +1371,7 @@ function goLiveModal() {
       Object.assign(s, {sres: pick.res, sfps: pick.fps, smode: pick.mode})
       const au = root.querySelector('input[name=saudio]')
       if (au) s.saudio = au.checked
+      s.scursor = root.querySelector('input[name=scursor]').checked
       saveSettings()
       closeModal()
       // getDisplayMedia, tıklamanın içinde (kullanıcı hareketiyle) çağrılmalı
@@ -1405,6 +1411,10 @@ async function startScreen() {
   if (S.voice !== v || v.scr || !t) { stream.getTracks().forEach(x => x.stop()); return }
   t.contentHint = s.smode === 'motion' ? 'motion' : 'detail'
   t.addEventListener('ended', stopScreen)
+  if (s.scursor && s.smode === 'motion' && !cursorSupported() && !S.cursorTip) {
+    S.cursorTip = true
+    toast('İpucu: Oyunda fare imleci yayında görünürse oyunu “Kenarlıksız / Pencereli tam ekran” moduna al; oyun imleci gizler.', 9000)
+  }
   const at = stream.getAudioTracks()[0]
   let send = stream
   if (at) {
