@@ -312,14 +312,26 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
 .restore summary:hover { text-decoration: underline; }
 /* ---------- müzik botu ---------- */
 #music { background: var(--deep); border-bottom: 1px solid var(--line); padding: 8px; }
-#mwrap { width: 100%; aspect-ratio: 16 / 9; border-radius: 6px; overflow: hidden; background: #000; }
-#mwrap iframe, #mwrap > div { width: 100%; height: 100%; display: block; border: 0; }
-#minfo .mt { margin-top: 6px; font-size: 13px; font-weight: 600; color: var(--head); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* Oynatıcı görünmez ve 1x1 piksel: video gösterilmez, YouTube en düşük video kalitesini seçer */
+#music { position: relative; }
+#mwrap { position: absolute; left: 0; top: 0; width: 1px; height: 1px; overflow: hidden; opacity: 0; pointer-events: none; }
+#mwrap iframe { width: 1px; height: 1px; border: 0; }
+.mrow { display: flex; gap: 8px; align-items: center; }
+.mthumb { width: 48px; height: 48px; border-radius: 6px; object-fit: cover; flex: none; background: #1db954; }
+.mtext { min-width: 0; flex: 1; }
+.mprog { display: flex; align-items: center; gap: 6px; margin-top: 8px; font-size: 10px; color: var(--muted); font-variant-numeric: tabular-nums; }
+.mbar { flex: 1; height: 4px; background: var(--hover); border-radius: 2px; overflow: hidden; }
+.mbar i { display: block; height: 100%; width: 0; background: #1db954; transition: width 1s linear; }
+.mvolrow { display: flex; align-items: center; gap: 6px; margin-top: 6px; }
+.mvolrow button { width: 30px; height: 28px; border-radius: 4px; background: var(--hover); font-size: 14px; flex: none; }
+.mvolrow input { flex: 1; min-width: 0; accent-color: #1db954; }
+.mvolrow span { font-size: 11px; color: var(--muted); width: 32px; text-align: right; font-variant-numeric: tabular-nums; }
+.mhint { font-size: 10px; color: var(--dim); margin-top: 2px; }
+#minfo .mt { font-size: 13px; font-weight: 600; color: var(--head); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 #minfo .msub { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .mctl { display: flex; align-items: center; gap: 4px; margin-top: 6px; }
 .mctl button { width: 30px; height: 28px; border-radius: 4px; background: var(--hover); font-size: 14px; flex: none; }
 .mctl button:hover { background: var(--sel); }
-.mctl input { flex: 1; min-width: 0; }
 .botav { background: #1db954 !important; font-size: 18px; }
 .av.s24.botav { font-size: 12px; }
 .bottag { background: var(--accent); color: #fff; font-size: 10px; font-weight: 700; padding: 1px 4px; border-radius: 3px; align-self: center; }

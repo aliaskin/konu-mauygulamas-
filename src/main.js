@@ -56,7 +56,7 @@ const S = {
   me: LS.get('kd_me', null),
   settings: Object.assign({
     ns: true, ec: true, agc: true, ptt: false, pttKey: 'KeyV', sens: 8, vq: 'med',
-    sres: 0, sfps: 0, smode: 'motion', saudio: true, sv: 2, echoGuard: true, mvol: 40, scursor: true,
+    sres: 0, sfps: 0, smode: 'motion', saudio: true, sv: 2, echoGuard: true, mvol: 60, mmute: false, scursor: true,
     mic: '', cam: '', sounds: true, notif: false, members: true
   }, LS.get('kd_set', {})),
   servers: LS.get('kd_servers', []),
@@ -812,7 +812,7 @@ function renderSide() {
       for (const u of us) {
         h += `<div class="vu" data-act="prof" data-uid="${esc(u.uid)}">${avatar(u.n, u.c, 's24' + (u.st.spk && !u.st.m ? ' spk' : ''), '', `data-pk="${u.pk}"`)}<span class="nm">${esc(u.n)}</span>${u.st.scr ? '<span class="live">CANLI</span>' : ''}${u.st.cam ? '<span class="ico">📷</span>' : ''}${u.st.d ? '<span class="ico">🔇</span>' : u.st.m ? '<span class="ico">🎙️̸</span>' : ''}</div>`
       }
-      if (ms?.cur) h += `<div class="vu" title="${esc(ms.cur.t)}"><div class="av s24 botav">🎵</div><span class="nm">Kanka Müzik · ${esc(ms.cur.t)}</span>${ms.playing ? '' : '<span class="ico">⏸️</span>'}</div>`
+      if (ms?.cur) h += `<div class="vu" title="${esc(ms.cur.t)}"${S.voice && S.voice.sid === sid && S.voice.cid === c.id ? ' data-act="bot-vol"' : ''}><div class="av s24 botav">🎵</div><span class="nm">Kanka Müzik · ${esc(ms.cur.t)}</span>${ms.playing ? '' : '<span class="ico">⏸️</span>'}</div>`
       h += '</div>'
     }
   }
@@ -1765,7 +1765,8 @@ const MP = {player: null, ready: null, vid: null, blocked: false, chain: Promise
 const BOT_HELP = `**🎵 Kanka Müzik**, ses kanalındayken herhangi bir metin kanalına yaz:
 \`!play şarkı adı\` veya \`!play YouTube/Spotify linki\`: çalar ya da sıraya ekler
 \`!skip\`: sıradakine geç · \`!pause\` / \`!resume\`: duraklat / devam · \`!stop\`: durdur ve sırayı temizle
-\`!queue\`: sırayı göster · \`!np\`: şu an çalan · \`!remove 2\`: sıradaki 2. şarkıyı çıkar`
+\`!queue\`: sırayı göster · \`!np\`: şu an çalan · \`!remove 2\`: sıradaki 2. şarkıyı çıkar
+\`!ses 50\`: bot sesini herkes için ayarla (0-100). Kendi duyduğun sesi müzik panelindeki kaydırıcıdan ayarla.`
 const mPos = st => !st?.cur ? 0 : st.playing ? st.base.p + (performance.now() - st.base.tr) / 1000 : st.base.p
 const myMusicKey = () => S.voice ? S.voice.sid + '|' + S.voice.cid : null
 const newVer = key => Math.max(Date.now() * 1000 + Math.floor(Math.random() * 1000), (S.music[key]?.ver || 0) + 1000)
@@ -1775,7 +1776,7 @@ function sanitizeItem(x) {
 }
 function musWire(key, lead) {
   const st = S.music[key]
-  return {vc: key.split('|')[1], ver: st.ver, q: st.q, cur: st.cur, pos: mPos(st), playing: st.playing, lead: !!lead}
+  return {vc: key.split('|')[1], ver: st.ver, q: st.q, cur: st.cur, pos: mPos(st), playing: st.playing, vol: st.vol ?? 100, lead: !!lead}
 }
 function musSend(key, target, lead) {
   const c = S.conns[key.split('|')[0]]
@@ -1791,14 +1792,16 @@ function onMus(c, d) {
     q: (Array.isArray(d.q) ? d.q : []).slice(0, 100).map(sanitizeItem).filter(Boolean),
     cur: sanitizeItem(d.cur),
     playing: !!d.playing,
+    vol: Math.min(100, Math.max(0, Math.round(+d.vol))) || (d.vol === 0 ? 0 : 100),
     base: {p: Math.min(86400, Math.max(0, +d.pos || 0)), tr: performance.now()}
   }
   if (key === myMusicKey()) applyMusic()
   inv('side')
 }
 // Durumu değiştir (komut veren taraf): yerelde uygula ve herkese yay
-function setMusic(key, {q, cur, playing, pos}, ver) {
-  S.music[key] = {ver: ver || newVer(key), q, cur, playing, base: {p: pos || 0, tr: performance.now()}}
+function setMusic(key, {q, cur, playing, pos, vol}, ver) {
+  vol = vol ?? S.music[key]?.vol ?? 100
+  S.music[key] = {ver: ver || newVer(key), q, cur, playing, vol, base: {p: pos || 0, tr: performance.now()}}
   musSend(key)
   if (key === myMusicKey()) applyMusic()
   inv('side')
@@ -1844,7 +1847,7 @@ async function musicCommand(text) {
   const C = {play: 'play', p: 'play', 'çal': 'play', cal: 'play', skip: 'skip', s: 'skip', 'geç': 'skip', gec: 'skip', next: 'skip',
     stop: 'stop', dur: 'stop', leave: 'stop', pause: 'pause', duraklat: 'pause', resume: 'resume', devam: 'resume',
     queue: 'queue', q: 'queue', 'sıra': 'queue', sira: 'queue', np: 'np', nowplaying: 'np', remove: 'remove', sil: 'remove',
-    help: 'help', 'yardım': 'help', yardim: 'help', komutlar: 'help'}[cmd]
+    help: 'help', 'yardım': 'help', yardim: 'help', komutlar: 'help', volume: 'vol', vol: 'vol', ses: 'vol', v: 'vol'}[cmd]
   if (!C) return
   const ck = curKey()
   const say = t => botSay(t, ck)
@@ -1891,6 +1894,13 @@ async function musicCommand(text) {
     case 'queue':
       if (!st.cur) return say('Sıra boş. `!play şarkı adı` ile başlat.')
       return say(`🎶 **Şimdi:** ${st.cur.t}\n` + (st.q.length ? st.q.slice(0, 15).map((x, i) => `${i + 1}. ${x.t} (${x.by})`).join('\n') + (st.q.length > 15 ? `\n… ve ${st.q.length - 15} şarkı daha` : '') : 'Sırada başka şarkı yok.'))
+    case 'vol': {
+      if (!arg) return say(`🔊 Bot sesi bu kanalda herkes için **%${st.vol ?? 100}**. Değiştirmek için: \`!ses 50\` (0-100). Kendi duyduğun sesi müzik panelindeki kaydırıcıdan ayarlayabilirsin.`)
+      const n = parseInt(arg.replace('%', ''), 10)
+      if (!(n >= 0 && n <= 100)) return say('Ses 0 ile 100 arasında olmalı. Örnek: `!ses 50`')
+      if (!st.cur) { S.music[key] = {...st, vol: n} } else setMusic(key, {...st, pos: mPos(st), vol: n})
+      return say(`🔊 Bot sesi herkes için **%${n}** olarak ayarlandı.`)
+    }
     case 'remove': {
       const n = parseInt(arg, 10)
       if (!(n >= 1 && n <= st.q.length)) return say('Hangi şarkı? Örnek: `!remove 2` (numara için `!queue`).')
@@ -1905,9 +1915,10 @@ async function musicCommand(text) {
 function musicVolume() {
   const p = MP.player
   if (!p || !MP.isReady) return
+  const st = S.music[myMusicKey()]
   try {
-    p.setVolume(S.settings.mvol)
-    if (S.st.d) p.mute(); else p.unMute()
+    p.setVolume(Math.round(S.settings.mvol * (st?.vol ?? 100) / 100))
+    if (S.st.d || S.settings.mmute) p.mute(); else p.unMute()
   } catch {}
 }
 function ensurePlayer() {
@@ -1917,7 +1928,7 @@ function ensurePlayer() {
     host.innerHTML = '<div id="mplayer"></div>'
     const to = setTimeout(() => rej(new Error('YouTube oynatıcısı zaman aşımına uğradı')), 15000)
     MP.player = new YT.Player('mplayer', {
-      width: 224, height: 126,
+      width: 1, height: 1,
       playerVars: {autoplay: 1, controls: 0, disablekb: 1, playsinline: 1, rel: 0, iv_load_policy: 3, fs: 0, origin: location.origin},
       events: {
         onReady: () => { clearTimeout(to); MP.isReady = true; musicVolume(); res(MP.player) },
@@ -1991,7 +2002,7 @@ function onYtState(e) {
   const key = myMusicKey()
   const st = key && S.music[key]
   if (!st || !st.cur || st.cur.id !== MP.vid) return
-  S.music[key] = {ver: st.ver + 1, q: st.q.slice(1), cur: st.q[0] || null, playing: true, base: {p: 0, tr: performance.now()}}
+  S.music[key] = {ver: st.ver + 1, q: st.q.slice(1), cur: st.q[0] || null, playing: true, vol: st.vol, base: {p: 0, tr: performance.now()}}
   applyMusic()
   if (amMusicLeader()) musSend(key, null, true)
   inv('side')
@@ -2006,7 +2017,7 @@ function onYtError(e) {
     S.music[key] = {...st, ver: st.ver + 1, cur: {...st.cur, id: st.cur.alt[0], alt: st.cur.alt.slice(1)}, base: {p: 0, tr: performance.now()}}
   } else {
     toast(`“${st.cur.t}” oynatılamıyor (kod ${e.data}), geçiliyor.`)
-    S.music[key] = {ver: st.ver + 1, q: st.q.slice(1), cur: st.q[0] || null, playing: true, base: {p: 0, tr: performance.now()}}
+    S.music[key] = {ver: st.ver + 1, q: st.q.slice(1), cur: st.q[0] || null, playing: true, vol: st.vol, base: {p: 0, tr: performance.now()}}
   }
   applyMusic()
   musSend(key, null, true)
@@ -2016,12 +2027,49 @@ function renderMusic() {
   const el = $('#music')
   const key = myMusicKey()
   const st = key && S.music[key]
-  if (!st || !st.cur) { el.hidden = true; return }
+  if (!st || !st.cur) { el.hidden = true; stopMusicClock(); return }
   el.hidden = false
-  $('#minfo').innerHTML = `<div class="mt" title="${esc(st.cur.t)}">${esc(st.cur.t)}</div>
-    <div class="msub">ekleyen ${esc(st.cur.by)}${st.q.length ? ` · sırada ${st.q.length} şarkı` : ''}</div>
+  const muted = S.settings.mmute
+  $('#minfo').innerHTML = `<div class="mrow"><img class="mthumb" src="https://i.ytimg.com/vi/${st.cur.id}/mqdefault.jpg" alt="" loading="lazy" decoding="async">
+    <div class="mtext"><div class="mt" title="${esc(st.cur.t)}">${esc(st.cur.t)}</div><div class="msub">🎵 Kanka Müzik · ekleyen ${esc(st.cur.by)}${st.q.length ? ` · sırada ${st.q.length}` : ''}</div></div></div>
+    <div class="mprog"><span id="mtime">0:00</span><div class="mbar"><i id="mbar"></i></div><span id="mdur">–:––</span></div>
     ${MP.blocked ? '<button class="btn full" data-act="m-start" style="margin-top:6px">▶ Müziği başlat</button>' : ''}
-    <div class="mctl"><button data-act="m-toggle" title="${st.playing ? 'Duraklat' : 'Devam'}">${st.playing ? '⏸️' : '▶️'}</button><button data-act="m-skip" title="Geç">⏭️</button><button data-act="m-stop" title="Durdur">⏹️</button><input type="range" min="0" max="100" value="${S.settings.mvol}" id="mvol" title="Müzik sesi (yalnızca sende)"></div>`
+    <div class="mctl"><button data-act="m-toggle" title="${st.playing ? 'Duraklat' : 'Devam'}">${st.playing ? '⏸️' : '▶️'}</button><button data-act="m-skip" title="Sıradakine geç">⏭️</button><button data-act="m-stop" title="Durdur ve sırayı temizle">⏹️</button></div>
+    <div class="mvolrow"><button data-act="m-mute" title="${muted ? 'Sesi aç' : 'Sustur'}">${muted ? '🔇' : S.settings.mvol < 40 ? '🔉' : '🔊'}</button><input type="range" min="0" max="100" value="${S.settings.mvol}" id="mvol" aria-label="Bot sesi"><span id="mvolv">%${S.settings.mvol}</span></div>
+    <div class="mhint">Bot sesi (sadece senin duyduğun)${(st.vol ?? 100) !== 100 ? ` · kanal sesi %${st.vol} (\`!ses\`)` : ''}</div>`
+  startMusicClock()
+}
+// İlerleme çubuğu: yalnızca panel görünürken, saniyede bir (çok ucuz)
+function startMusicClock() {
+  if (MP.clock) return
+  MP.clock = setInterval(() => {
+    if (document.hidden || !MP.isReady || !$('#mtime')) return
+    try {
+      const t = MP.player.getCurrentTime() || 0, d = MP.player.getDuration() || 0
+      $('#mtime').textContent = fmtDur(t)
+      $('#mdur').textContent = d ? fmtDur(d) : '–:––'
+      $('#mbar').style.width = d ? Math.min(100, t / d * 100) + '%' : '0'
+    } catch {}
+  }, 1000)
+}
+function stopMusicClock() { clearInterval(MP.clock); MP.clock = 0 }
+function botVolumePop(anchor) {
+  const st = S.music[myMusicKey()]
+  pop(`<div class="prof"><div class="ph"><div class="av s80 botav" style="font-size:36px">🎵</div><div class="pn">Kanka Müzik</div><div class="uid">${st?.cur ? esc(st.cur.t) : 'Çalmıyor'}</div></div>
+    <div style="padding:0 8px 8px"><div class="lbl2">Bot sesi (sadece senin duyduğun) · <span id="pvolv">%${S.settings.mvol}</span></div><input type="range" min="0" max="100" value="${S.settings.mvol}" id="pvol">
+    <div class="hint">Herkes için: <code>!ses 50</code>${st ? ` (şu an %${st.vol ?? 100})` : ''}</div></div></div>`, anchor)
+  const r = $('#pop #pvol')
+  r.addEventListener('input', () => setMusicVolume(+r.value))
+}
+function setMusicVolume(v) {
+  S.settings.mvol = v
+  if (v > 0) S.settings.mmute = false
+  musicVolume()
+  const mv = $('#mvol'); if (mv && +mv.value !== v) mv.value = v
+  const lbl = $('#mvolv'); if (lbl) lbl.textContent = '%' + v
+  const pl = $('#pvolv'); if (pl) pl.textContent = '%' + v
+  clearTimeout(S.mvolT)
+  S.mvolT = setTimeout(saveSettings, 500)
 }
 function musicButton(act) {
   const key = myMusicKey()
@@ -2461,6 +2509,8 @@ function onClick(e) {
     case 'new-srv': newServerModal(); break
     case 'install': installApp(); break
     case 'm-start': case 'm-toggle': case 'm-skip': case 'm-stop': musicButton(act); break
+    case 'm-mute': S.settings.mmute = !S.settings.mmute; saveSettings(); musicVolume(); renderMusic(); break
+    case 'bot-vol': botVolumePop(t); return
     case 'join-srv': joinServerModal(); break
     case 'ch': if (!e.target.closest('[data-act="ch-menu"]')) go(S.view.sid, t.dataset.cid); break
     case 'ch-menu': {
@@ -2589,13 +2639,7 @@ function bind() {
     }
   })
   i.addEventListener('input', () => { autoGrow(); if (i.value) sendTyping() })
-  $('#music').addEventListener('input', e => {
-    if (e.target.id !== 'mvol') return
-    S.settings.mvol = +e.target.value
-    musicVolume()
-    clearTimeout(S.mvolT)
-    S.mvolT = setTimeout(saveSettings, 500)
-  })
+  $('#music').addEventListener('input', e => { if (e.target.id === 'mvol') setMusicVolume(+e.target.value) })
   i.addEventListener('paste', e => {
     const files = [...(e.clipboardData?.files || [])]
     if (files.length) { e.preventDefault(); sendFiles(files) }
