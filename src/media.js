@@ -122,7 +122,7 @@ export function makeTunedPC(remoteDecFor) {
 export function screenBitrate(w, h, fps, mime, motion) {
   const px = Math.max(0.05, (w * h) / (1920 * 1080))
   const br = 4.5e6 * Math.pow(Math.max(5, fps) / 30, 0.6) * Math.pow(px, 0.75) * (motion ? 1.25 : 1) * (CODEC_EFF[mime] || 1)
-  return Math.round(Math.min(25e6, Math.max(300e3, br)))
+  return Math.round(Math.min(30e6, Math.max(300e3, br)))
 }
 
 // Bir izin anlık video istatistikleri: çözünürlük, FPS, codec, bit hızı, donanım kullanımı, kısıt nedeni

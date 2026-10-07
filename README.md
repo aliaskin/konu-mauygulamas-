@@ -15,9 +15,13 @@ Mesajlar, ses ve görüntü doğrudan arkadaşlarının cihazlarına (P2P, WebRT
 - **Sesli sohbet**: gürültü/yankı engelleme, konuşan kişinin yeşil çerçevesi, sustur/sağırlaştır, bas-konuş (push-to-talk),
   kişi başı ses seviyesi, giriş hassasiyeti
 - **Görüntülü sohbet**: kamera aç/kapa, tıkla büyüt, tam ekran
-- **Ekran paylaşımı**: 720p / 1080p / 1440p, 30 / 60 / **120 FPS**, “Oyun/Video” (akıcılık) veya “Yazı/Kod” (netlik) modu,
-  stereo ve yüksek kaliteli bilgisayar sesi, yayın sırasında kesintisiz kalite değiştirme, tam ekran ve resim içinde resim,
+- **Ekran paylaşımı**: **Kaynak** (ekranın kendi çözünürlüğü, en net) / 4K / 1440p / 1080p / 720p, 30 / 60 / **120 FPS**, “Oyun/Video” (akıcılık) veya “Yazı/Kod” (netlik) modu,
+  **oyun/bilgisayar sesi** (stereo, 192 kbps; sohbetteki seslerin yayına geri karışması engellenir),
+  izleyici başına ayrı “yayın sesi” seviyesi, yayın sırasında kesintisiz kalite değiştirme, tam ekran ve resim içinde resim,
   kutucukta canlı kalite göstergesi (çözünürlük · FPS · codec · bit hızı)
+- **Kalıcı hesap**: hesabın (kimlik, ad, sunucular) tarayıcıda üç ayrı yerde saklanır (localStorage, IndexedDB, çerez);
+  biri silinse bile otomatik geri gelir. Ayarlar → Profil → **Hesap yedeği** koduyla başka bilgisayara taşınabilir
+- **Bilgisayara yüklenebilir uygulama**: soldaki 💻 butonu veya tarayıcının “Yükle” simgesi; masaüstünden ayrı pencerede açılır
 - Mobil uyumlu arayüz
 
 ## Performans (PC'yi yormaması için)
@@ -26,10 +30,12 @@ Mesajlar, ses ve görüntü doğrudan arkadaşlarının cihazlarına (P2P, WebRT
 - **Donanım kodlama**: tarayıcıya hangi codec'leri ekran kartıyla kodlayıp çözebildiği sorulur (AV1 › VP9 › H.264);
   yayın, hem yayıncının GPU'suyla kodlanabilen hem de izleyicinin GPU'suyla çözülebilen codec ile gönderilir
 - Ekran yayını yalnızca **“Yayını İzle”ye basan** kişilere gönderilir (Discord gibi); kimse izlemiyorsa hiç kodlama yapılmaz
-- **İzleyiciye göre kalite**: yayın büyük/tam ekransa tam kalite, ızgarada orta boy kutucuksa 720p/60, küçükse 360p/30,
-  alt şeritte küçük resimse 360p/15 gönderilir. İzleyici sohbete geçerse veya sekmeyi kapatırsa o kişi için kodlama tamamen durur
+- **İzleyiciye göre kalite**: her izleyiciye, yayının onun ekranında kapladığı alanın iki katı netlikte görüntü gider
+  (tam ekranda monitörünün çözünürlüğü kadar). 1080p monitöre 4K gönderilmez; ızgaradaki küçük kutucuğa 360p/30,
+  alt şeritteki küçük resme 360p/15 gider. İzleyici sohbete geçerse veya sekmeyi kapatırsa o kişi için kodlama tamamen durur
   (ses devam eder), geri dönünce anında devam eder
-- İzleyici sayısı arttıkça (her izleyici ayrı kodlama demek) yayıncının bilgisayarı yorulmasın diye FPS kademeli olarak sınırlanır
+- **Yük bütçesi**: her izleyici ayrı kodlama demek. Toplam yük bütçeyi aşarsa önce FPS (120→60), sonra çözünürlük kademeli düşürülür;
+  donanım kodlayıcı yoksa bütçe daha sıkı uygulanır. Yayıncının kutucuğunda “yük dengeleniyor” yazar
 - Yayıncının kendi önizlemesi 15 FPS'lik hafif bir kopyadır; tam kaliteyi kendine göstermek için GPU harcanmaz
 - Bit hızı çözünürlük, FPS, codec verimliliği ve içerik türüne göre hesaplanır; ağ ya da işlemci yetmezse tarayıcı otomatik
   düşürür ve kutucukta uyarı gösterilir
@@ -53,6 +59,11 @@ HTTPS veren herhangi bir statik barındırma (Netlify, Cloudflare Pages, Vercel�
    Alttaki 📷 ve 🖥️ butonları kamerayı ve ekran paylaşımını açar.
 
 ## Bilmen gerekenler
+
+- **Oyun sesi**: paylaşım penceresinde **“Tüm ekran”**ı seçip **“Sistem sesini de paylaş”**ı işaretle (Windows'ta Chrome/Edge).
+  Sekme paylaşırken “Sekme sesini de paylaş”. Tarayıcılar tek bir pencere paylaşılırken ses vermez; macOS'ta sistem sesi
+  tarayıcı ve işletim sistemi sürümüne bağlıdır.
+- Tarayıcı ayarlarından “site verilerini ve çerezleri sil” yapılırsa hesap da silinir; bu yüzden hesap yedek kodunu bir yere kaydet.
 
 - Sunucu olmadığı için mesaj geçmişi herkesin kendi tarayıcısında saklanır ve çevrimiçi olan üyeler arasında eşitlenir.
   Sen yokken yazılan mesajlar, o sırada çevrimiçi olan biri tekrar geldiğinde sana da gelir.

@@ -21,9 +21,16 @@ const MAX_FILE = 100 * 1024 * 1024
 // İsteğe bağlı: ?relay=wss://a,wss://b ile özel Nostr röleleri kullan
 const RELAYS = (new URLSearchParams(location.search).get('relay') || '').split(',').filter(u => /^wss?:\/\//.test(u))
 const PAGE = 80
+// Hesap ve ayarlar ayrıca IndexedDB'ye (ve kimlik + sunucular çereze) yansıtılır; biri silinirse diğerinden dönülür
+const MIRROR = new Set(['kd_me', 'kd_servers', 'kd_set', 'kd_dms', 'kd_vol', 'kd_svol', 'kd_lastch', 'kd_st'])
 const LS = {
   get(k, d) { try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : d } catch { return d } },
-  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); return true } catch { return false } },
+  set(k, v) {
+    let ok = false
+    try { localStorage.setItem(k, JSON.stringify(v)); ok = true } catch {}
+    if (MIRROR.has(k)) mirror(k, v)
+    return ok
+  },
   del(k) { try { localStorage.removeItem(k) } catch {} }
 }
 const pad = n => String(n).padStart(2, '0')
@@ -47,13 +54,15 @@ const S = {
   me: LS.get('kd_me', null),
   settings: Object.assign({
     ns: true, ec: true, agc: true, ptt: false, pttKey: 'KeyV', sens: 8, vq: 'med',
-    sres: 1080, sfps: 0, smode: 'motion', saudio: true,
+    sres: 0, sfps: 0, smode: 'motion', saudio: true, sv: 2,
     mic: '', cam: '', sounds: true, notif: false, members: true
   }, LS.get('kd_set', {})),
   servers: LS.get('kd_servers', []),
   dms: LS.get('kd_dms', []),
   unread: LS.get('kd_unread', {}),
   vol: LS.get('kd_vol', {}),
+  svol: LS.get('kd_svol', {}),
+  saudios: {},
   st: Object.assign({m: false, d: false}, LS.get('kd_st', {})),
   view: LS.get('kd_view', {sid: null, cid: null}),
   conns: {},
@@ -72,6 +81,8 @@ const S = {
   pttDown: false,
   lastCh: LS.get('kd_lastch', {})
 }
+// Eski sürümden gelen ayarlar: ekran paylaşımı varsayılanı artık kaynak (en net) çözünürlük
+if ((S.settings.sv || 0) < 2) { S.settings.sres = 0; S.settings.sv = 2 }
 const saveServers = () => LS.set('kd_servers', S.servers)
 const saveSettings = () => LS.set('kd_set', S.settings)
 const srvById = id => S.servers.find(s => s.id === id)
@@ -348,6 +359,7 @@ function voiceStateChanged(c, pid, prev, st) {
     if (!st.cam) delete r.cam
     if (!st.scr) delete r.scr
   }
+  if (!st.scr) dropScreenAudio(pid)
   if (!st.scr) { v.watching.delete(pid); delete v.lvSent[pid] }
   syncMedia(pid)
 }
@@ -733,6 +745,7 @@ function renderRail() {
   }
   h += '<button class="srv add" data-act="new-srv" title="Sunucu oluştur">＋</button>'
   h += '<button class="srv add" data-act="join-srv" title="Sunucuya katıl" style="font-size:20px">🔗</button>'
+  if (installEvt) h += '<button class="srv add" data-act="install" title="Uygulamayı bilgisayara yükle" style="font-size:20px">💻</button>'
   $('#rail').innerHTML = h
 }
 function voiceUsers(sid, cid) {
@@ -1032,25 +1045,42 @@ function applyParams(sd, mutate) {
   }
   try { attempt(true).catch(() => attempt(false)).catch(() => {}) } catch {}
 }
-function screenPlan(pid, track) {
+// Tüm izleyiciler için ekran yayını planı (çözünürlük, FPS, bit hızı). Her izleyici ayrı bir kodlayıcı
+// demek; toplam piksel hızı bütçeyi aşarsa önce FPS, sonra çözünürlük kademeli düşürülür.
+// Yazılım (işlemci) kodlaması donanıma göre kabaca 6 kat pahalı sayılır.
+const LOAD_BUDGET = 1.0e9
+function screenPlans() {
   const v = S.voice, s = S.settings
-  const st = track.getSettings ? track.getSettings() : {}
-  const srcH = st.height || s.sres
+  const t = v?.scr?.getVideoTracks()[0]
+  if (!t) return {}
+  const st = t.getSettings ? t.getSettings() : {}
+  const srcH = st.height || 1080
   const srcW = st.width || Math.round(srcH * 16 / 9)
-  const codec = pickCodec(S.conns[v.sid]?.peers[pid]?.hw)
-  const hw = isHwCodec(codec)
-  const n = v.watchers.size
-  let fps = Math.min(scrFps(), Math.round(st.frameRate || 1000))
-  let h = srcH
-  // Her izleyici ayrı bir kodlayıcı demek: izleyici sayısına göre toplam yükü sınırla
-  if (n > (hw ? 3 : 1)) fps = Math.min(fps, 60)
-  if (n > (hw ? 5 : 3)) { fps = Math.min(fps, 30); h = Math.min(h, 720) }
-  const lv = v.levels[pid] || 'full'
-  if (lv === 'mid') { fps = Math.min(fps, 60); h = Math.min(h, 720) }
-  if (lv === 'small') { fps = Math.min(fps, 30); h = Math.min(h, 360) }
-  if (lv === 'low') { fps = Math.min(fps, 15); h = Math.min(h, 360) }
-  const scale = Math.max(1, srcH / h)
-  return {active: lv !== 'off', fps, scale, br: screenBitrate(srcW / scale, srcH / scale, fps, codec, s.smode === 'motion')}
+  const maxFps = Math.min(scrFps(), Math.round(st.frameRate || 1000))
+  const plans = {}
+  for (const pid of v.watchers) {
+    const L = v.levels[pid] || {lv: 'full', h: 0}
+    const codec = pickCodec(S.conns[v.sid]?.peers[pid]?.hw)
+    let fps = maxFps
+    let h = Math.min(srcH, L.h || srcH)
+    if (L.lv === 'mid') fps = Math.min(fps, 60)
+    if (L.lv === 'small') { fps = Math.min(fps, 30); h = Math.min(h, 360) }
+    if (L.lv === 'low') { fps = Math.min(fps, 15); h = Math.min(h, 360) }
+    plans[pid] = {active: L.lv !== 'off', fps, h, codec, hw: isHwCodec(codec), limited: false}
+  }
+  const act = Object.values(plans).filter(p => p.active)
+  const load = () => act.reduce((a, p) => a + srcW * srcH * (p.h / srcH) ** 2 * p.fps * (p.hw ? 1 : 6), 0)
+  const steps = [p => { if (p.fps > 60) p.fps = 60 }, p => { if (p.h > 1440) p.h = 1440 }, p => { if (p.h > 1080) p.h = 1080 },
+    p => { if (p.fps > 30) p.fps = 30 }, p => { if (p.h > 720) p.h = 720 }]
+  for (const step of steps) {
+    if (load() <= LOAD_BUDGET) break
+    for (const p of act) { const b = p.fps + p.h; step(p); if (p.fps + p.h !== b) p.limited = true }
+  }
+  for (const p of Object.values(plans)) {
+    p.scale = Math.max(1, srcH / p.h)
+    p.br = screenBitrate(srcW / p.scale, srcH / p.scale, p.fps, p.codec, s.smode === 'motion')
+  }
+  return plans
 }
 function tune(pid) {
   const v = S.voice
@@ -1068,7 +1098,8 @@ function tune(pid) {
       const isScr = scrA.includes(t)
       applyParams(sd, p => Object.assign(p.encodings[0], {maxBitrate: isScr ? 192000 : 64000, priority: isScr ? 'medium' : 'high', networkPriority: isScr ? 'medium' : 'high'}))
     } else if (t === scrV) {
-      const plan = screenPlan(pid, t)
+      const plan = screenPlans()[pid]
+      if (!plan) continue
       applyParams(sd, (p, deg) => {
         Object.assign(p.encodings[0], {active: plan.active, maxBitrate: plan.br, maxFramerate: plan.fps, scaleResolutionDownBy: plan.scale, priority: 'medium', networkPriority: 'medium'})
         if (deg) p.degradationPreference = S.settings.smode === 'motion' ? 'maintain-framerate' : 'maintain-resolution'
@@ -1084,9 +1115,10 @@ function onStream(c, pid, stream, meta) {
   if (!v || v.sid !== c.sid || !['mic', 'cam', 'scr'].includes(k)) return
   const r = v.remote[pid] ||= {}
   r[k] = stream
-  const drop = () => { if (r[k] === stream) { delete r[k]; inv('stage') } }
+  const drop = () => { if (r[k] === stream) { delete r[k]; if (k === 'scr') dropScreenAudio(pid); inv('stage') } }
   stream.addEventListener('removetrack', () => { if (!stream.getTracks().length) drop() })
   stream.getTracks().forEach(t => t.addEventListener('ended', drop))
+  if (k === 'scr') attachScreenAudio(pid, stream)
   if (k === 'mic') {
     let a = S.audios[pid]
     if (!a) {
@@ -1100,11 +1132,36 @@ function onStream(c, pid, stream, meta) {
   }
   inv('stage')
 }
+// Yayın (oyun) sesi görüntüden bağımsız çalar: izleyici sohbete geçse de, görüntü kodlaması dursa da ses devam eder
+function attachScreenAudio(pid, stream) {
+  const update = () => {
+    const tracks = stream.getAudioTracks()
+    if (!tracks.length) { dropScreenAudio(pid); return }
+    let a = S.saudios[pid]
+    if (!a) {
+      a = S.saudios[pid] = document.createElement('audio')
+      a.autoplay = true
+      $('#audios').appendChild(a)
+    }
+    const cur = a.srcObject?.getAudioTracks() || []
+    if (cur.length !== tracks.length || cur.some((t, i) => t !== tracks[i])) a.srcObject = new MediaStream(tracks)
+    applyAudio()
+    a.play().catch(() => {})
+  }
+  update()
+  stream.addEventListener('addtrack', update)
+  stream.addEventListener('removetrack', update)
+}
+function dropScreenAudio(pid) {
+  const a = S.saudios[pid]
+  if (a) { a.srcObject = null; a.remove(); delete S.saudios[pid] }
+}
 function dropRemote(pid) {
   const v = S.voice
   if (v) delete v.remote[pid]
   const a = S.audios[pid]
   if (a) { a.srcObject = null; a.remove(); delete S.audios[pid] }
+  dropScreenAudio(pid)
   for (const key of [pid + ':u', pid + ':s']) {
     const el = S.tileEls.get(key)
     if (el) { const vid = el.querySelector('video'); if (vid) vid.srcObject = null; el.remove(); S.tileEls.delete(key) }
@@ -1116,17 +1173,15 @@ function uidOfPid(pid) {
   return v && S.conns[v.sid]?.peers[pid]?.uid
 }
 function volOf(uid) { const x = S.vol[uid]; return typeof x === 'number' ? Math.min(1, Math.max(0, x)) : 1 }
+const svolOf = uid => { const x = S.svol[uid]; return typeof x === 'number' ? Math.min(1, Math.max(0, x)) : 1 }
 function applyAudio() {
   for (const [pid, a] of Object.entries(S.audios)) {
     a.muted = !!S.st.d
     a.volume = volOf(uidOfPid(pid))
   }
-  for (const [key, el] of S.tileEls) {
-    const vid = el.querySelector('video')
-    if (vid && key.endsWith(':s') && !key.startsWith('me:')) {
-      vid.muted = !!S.st.d
-      vid.volume = volOf(uidOfPid(key.slice(0, -2)))
-    }
+  for (const [pid, a] of Object.entries(S.saudios)) {
+    a.muted = !!S.st.d
+    a.volume = svolOf(uidOfPid(pid))
   }
 }
 function applyMic() {
@@ -1243,8 +1298,11 @@ const scrFps = () => S.settings.sfps || (HW.enc.length ? 120 : 60)
 function screenConstraints() {
   const h = S.settings.sres
   const fps = scrFps()
-  // resizeMode açıkça verilmeli: Chrome applyConstraints'te varsayılanı 'none' yapıp doğal (ör. 4K) çözünürlüğe dönüyor
-  return {height: {max: h}, width: {max: Math.round(h * 2.4)}, frameRate: {ideal: fps, max: fps}, resizeMode: 'crop-and-scale'}
+  // resizeMode açıkça verilmeli: Chrome applyConstraints'te varsayılanı 'none' yapıp boyut sınırını yok sayıyor
+  const c = {frameRate: {ideal: fps, max: fps}, resizeMode: 'crop-and-scale'}
+  // 0 = kaynak çözünürlük: ekran neyse o (1440p, 4K…), hiç küçültme yok
+  if (h) Object.assign(c, {height: {max: h}, width: {max: Math.round(h * 2.4)}})
+  return c
 }
 const switchRow = (name, on, label) => `<label class="row"><span>${label}</span><span class="sw"><input type="checkbox" name="${name}"${on ? ' checked' : ''}><i></i></span></label>`
 function goLiveModal() {
@@ -1260,11 +1318,12 @@ function goLiveModal() {
     : '⚠️ Bu cihazda donanım kodlayıcı bulunamadı; yayın işlemcide kodlanır. Takılma olursa 60 FPS seç.'
   modal(`<div class="mh"><h2>${live ? 'Yayın kalitesi' : 'Ekranını paylaş'}</h2><p>${live ? 'Değişiklikler yayını kesmeden uygulanır.' : 'Paylaşacağın ekranı, pencereyi veya sekmeyi bir sonraki adımda seçeceksin.'}</p></div>
     <div class="mb">
-      <div class="field"><label>Çözünürlük</label>${seg('res', [[720, '720p'], [1080, '1080p'], [1440, '1440p']])}</div>
+      <div class="field"><label>Çözünürlük</label>${seg('res', [[0, 'Kaynak', 'en net'], [2160, '4K'], [1440, '1440p'], [1080, '1080p'], [720, '720p']])}</div>
       <div class="field"><label>Kare hızı</label>${seg('fps', [[30, '30 FPS'], [60, '60 FPS'], [120, '120 FPS']])}</div>
       <div class="field"><label>İçerik türü</label>${seg('mode', [['motion', '🎮 Oyun / Video', 'akıcılık öncelikli'], ['detail', '📝 Yazı / Kod', 'netlik öncelikli']])}</div>
-      ${live ? '' : switchRow('saudio', s.saudio, 'Bilgisayar sesini de paylaş')}
-      <div class="hint">${hw}<br>Yayın yalnızca “Yayını İzle”ye basanlara gönderilir; kimse izlemiyorsa hiç kodlama yapılmaz. Küçük pencerede izleyenlere otomatik olarak daha hafif bir sürüm gider. 120 FPS'i görmek için izleyicinin ekranı 120 Hz olmalı.</div>
+      ${live ? '' : switchRow('saudio', s.saudio, '🔊 Oyun / bilgisayar sesini de paylaş')}
+      ${live ? '' : '<div class="hint" style="margin-top:0">Oyun sesi için açılan pencerede <b>“Tüm ekran”</b> sekmesini seç ve alttaki <b>“Sistem sesini de paylaş”</b> kutusunu işaretle (Windows, Chrome/Edge). Tarayıcı sekmesi paylaşırken “Sekme sesini de paylaş”ı işaretle. Tek bir pencere paylaşılırken tarayıcılar ses vermez.</div>'}
+      <div class="hint">${hw}<br>“Kaynak”, ekranın kendi çözünürlüğüdür (ör. 1440p, 4K) ve en net görüntüyü verir. Her izleyiciye, ekranında gösterebileceğinden daha büyük görüntü gönderilmez; kimse izlemiyorsa hiç kodlama yapılmaz. 120 FPS'i görmek için izleyicinin ekranı 120 Hz olmalı.</div>
     </div>
     <div class="mf">${live ? '<button class="btn red" id="gl-stop">Yayını durdur</button>' : '<button class="btn sec" id="gl-cancel">Vazgeç</button>'}<button class="btn" id="gl-go">${live ? 'Uygula' : 'Yayına başla'}</button></div>`, root => {
     root.addEventListener('click', e => {
@@ -1292,15 +1351,26 @@ async function startScreen() {
   const v = S.voice
   if (!v || v.scr) return
   const s = S.settings
+  const base = {
+    video: screenConstraints(),
+    audio: s.saudio ? {
+      echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, sampleRate: 48000,
+      // Sohbetteki arkadaşlarının sesleri yayına geri karışmasın (destekleyen tarayıcılarda)
+      restrictOwnAudio: true, suppressLocalAudioPlayback: false
+    } : false,
+    selfBrowserSurface: 'exclude',
+    surfaceSwitching: 'include'
+  }
+  const extra = s.saudio ? {systemAudio: 'include', windowAudio: 'system'} : {systemAudio: 'exclude'}
   let stream
   try {
-    stream = await navigator.mediaDevices.getDisplayMedia({
-      video: screenConstraints(),
-      audio: s.saudio ? {echoCancellation: false, noiseSuppression: false, autoGainControl: false, channelCount: 2, sampleRate: 48000} : false,
-      systemAudio: s.saudio ? 'include' : 'exclude',
-      selfBrowserSurface: 'exclude',
-      surfaceSwitching: 'include'
-    })
+    try {
+      stream = await navigator.mediaDevices.getDisplayMedia({...base, ...extra})
+    } catch (e) {
+      // Eski tarayıcılar bilinmeyen bir seçeneğe TypeError verebilir: temel seçeneklerle tekrar dene
+      if (e.name !== 'TypeError') throw e
+      stream = await navigator.mediaDevices.getDisplayMedia({...base, systemAudio: extra.systemAudio})
+    }
   } catch (e) {
     if (e.name !== 'NotAllowedError') toast('Ekran paylaşılamadı: ' + (e.name || e.message))
     return
@@ -1309,6 +1379,11 @@ async function startScreen() {
   if (S.voice !== v || v.scr || !t) { stream.getTracks().forEach(x => x.stop()); return }
   t.contentHint = s.smode === 'motion' ? 'motion' : 'detail'
   t.addEventListener('ended', stopScreen)
+  const at = stream.getAudioTracks()[0]
+  if (at) at.contentHint = 'music'
+  else if (s.saudio) {
+    toast('Oyun sesi alınamadı. Ses için paylaşırken “Tüm ekran”ı seçip “Sistem sesini de paylaş” kutusunu işaretle (veya bir sekme paylaşıp “Sekme sesini de paylaş”ı işaretle).', 9000)
+  }
   // Kendi önizlememiz düşük FPS/çözünürlüklü bir kopya: tam kaliteyi kendine göstermek boşa GPU harcar
   const pt = t.clone()
   pt.applyConstraints({frameRate: {max: 15}, height: {max: 540}, width: {max: 1296}, resizeMode: 'crop-and-scale'}).catch(() => {})
@@ -1346,64 +1421,73 @@ function stopScreen() {
   inv('vbar', 'side', 'stage')
 }
 // Yayıncı tarafı: izleyicinin istediği kalite seviyesini kaydet ve kodlayıcıyı ayarla
+// Yayıncı tarafı: izleyicinin istediği kalite seviyesini kaydet ve kodlayıcıları ayarla
 function onWatch(c, d, pid) {
   const v = S.voice
   if (!v || v.sid !== c.sid) return
-  const before = v.watchers.size
   if (d && d.on && v.scr) {
     v.watchers.add(pid)
-    v.levels[pid] = LEVELS.includes(d.lv) ? d.lv : 'full'
+    v.levels[pid] = {lv: LEVELS.includes(d.lv) ? d.lv : 'full', h: Math.min(4320, Math.max(0, Math.round(+d.h) || 0))}
   } else {
     v.watchers.delete(pid)
     delete v.levels[pid]
   }
-  if (v.watchers.has(pid) && v.sent[pid]?.scr) tune(pid); else syncMedia(pid)
-  if (v.watchers.size !== before) retuneScreen()
+  if (!(v.watchers.has(pid) && v.sent[pid]?.scr)) syncMedia(pid)
+  // Yük bütçesi tüm izleyicilerde ortak: hepsini yeniden ayarla
+  retuneScreen()
   inv('stage')
 }
-// İzleyici tarafı
 function setWatching(pid, on) {
   const v = S.voice
   if (!v) return
+  const h = stepUp(screenPx())
   if (on) {
     v.watching.add(pid)
-    v.lvSent[pid] = 'full'
+    v.lvSent[pid] = 'full' + h
     S.focus = pid + ':s'
   } else {
     v.watching.delete(pid)
     delete v.lvSent[pid]
     if (v.remote[pid]) delete v.remote[pid].scr
+    dropScreenAudio(pid)
     if (S.focus === pid + ':s') S.focus = null
   }
-  S.conns[v.sid]?.a.watch.send({on: !!on, lv: 'full'}, {target: pid})
+  S.conns[v.sid]?.a.watch.send({on: !!on, lv: 'full', h}, {target: pid})
   inv('stage')
 }
 // Yayının ekranda ne kadar büyük göründüğüne göre yayıncıdan uygun kaliteyi iste:
 // görünmüyorsa hiç kodlanmasın, küçük kutucuksa hafif sürüm gelsin.
+// Yayının ekranda kaç piksel yükseklikte göründüğüne göre yayıncıdan uygun kaliteyi iste:
+// görünmüyorsa hiç kodlanmasın, ekranda gösterilebilecekten büyük görüntü gönderilmesin.
+const STEPS = [360, 540, 720, 1080, 1440, 2160, 4320]
+const stepUp = px => STEPS.find(x => x >= px) || 4320
+const screenPx = () => Math.round((window.screen?.height || 1080) * (window.devicePixelRatio || 1))
 function watchLevel(pid) {
   const key = pid + ':s'
   const el = S.tileEls.get(key)
   const vid = el?.querySelector('video')
-  if (vid && document.pictureInPictureElement === vid) return 'full'
-  if (!el || !el.isConnected || !S.showStage || document.hidden) return 'off'
-  if (document.fullscreenElement === el || S.focus === key) return 'full'
-  if (el.closest('.strip')) return 'low'
+  if (vid && document.pictureInPictureElement === vid) return {lv: 'full', h: stepUp(screenPx())}
+  if (!el || !el.isConnected || !S.showStage || document.hidden) return {lv: 'off', h: 0}
+  if (document.fullscreenElement === el) return {lv: 'full', h: stepUp(screenPx())}
+  // Netlik için kutucuğun piksel yüksekliğinin üstünde çözünürlük iste (yazılar keskin kalsın)
   const h = el.clientHeight * (window.devicePixelRatio || 1)
-  return h >= 700 ? 'full' : h >= 300 ? 'mid' : 'small'
+  if (S.focus === key) return {lv: 'full', h: stepUp(h * 2)}
+  if (el.closest('.strip')) return {lv: 'low', h: 360}
+  return {lv: h >= 700 ? 'full' : h >= 300 ? 'mid' : 'small', h: stepUp(h * 1.5)}
 }
 function updateWatchLevels() {
   const v = S.voice
   const c = v && S.conns[v.sid]
   if (!c) return
   for (const pid of v.watching) {
-    const lv = watchLevel(pid)
-    if (v.lvSent[pid] !== lv) {
-      v.lvSent[pid] = lv
-      c.a.watch.send({on: true, lv}, {target: pid})
+    const {lv, h} = watchLevel(pid)
+    const sig = lv + h
+    if (v.lvSent[pid] !== sig) {
+      v.lvSent[pid] = sig
+      c.a.watch.send({on: true, lv, h}, {target: pid})
     }
   }
 }
-
 // ---------- canlı yayın istatistikleri ----------
 let statsT = 0
 function startStats() { if (!statsT) statsT = setInterval(pollStats, 2000) }
@@ -1441,6 +1525,7 @@ async function pollStats() {
       const all = (await Promise.all(ws.map(pid => videoStats(peers[pid], t, 'out')))).filter(Boolean)
       const top = all.slice().sort((a, b) => b.fps - a.fps)[0]
       let txt = top ? `${top.h || st.height}p · ${top.fps} FPS · ${top.codec}${top.hw ? ' (GPU)' : ''} · ${ws.length} izleyici` : `${ws.length} izleyici`
+      if (Object.values(screenPlans()).some(p => p.limited)) txt += ' · yük dengeleniyor'
       const cpu = all.some(x => x.lim === 'cpu'), net = all.some(x => x.lim === 'bandwidth')
       if (cpu) txt += ' · ⚠️ İşlemci yetişemiyor, FPS veya çözünürlüğü düşür'
       else if (net) txt += ' · ⚠️ İnternet yetmiyor, kalite otomatik düşürüldü'
@@ -1483,8 +1568,7 @@ function tileEl(t) {
       vid.disableRemotePlayback = true
       el.prepend(vid)
     }
-    vid.muted = t.mine || t.kind === 'u' || !!S.st.d
-    if (t.kind === 's' && !t.mine) vid.volume = volOf(uidOfPid(t.pid))
+    vid.muted = true
     if (vid.srcObject !== t.stream) vid.srcObject = t.stream
     vid.className = t.kind === 'u' ? 'cam' + (t.mine ? ' mirror' : '') : ''
     ph.hidden = true
@@ -1605,12 +1689,12 @@ function pop(html, anchor) {
   p.style.top = y + 'px'
 }
 const closePop = () => { const p = $('#pop'); p.hidden = true; p.innerHTML = ''; S.popFor = null }
-function toast(t) {
+function toast(t, ms = 4000) {
   const el = document.createElement('div')
   el.className = 'toast'
   el.textContent = t
   $('#toasts').appendChild(el)
-  setTimeout(() => el.remove(), 4000)
+  setTimeout(() => el.remove(), ms)
 }
 function notify(title, body) {
   if (!document.hidden || !S.settings.notif || !('Notification' in window) || Notification.permission !== 'granted') return
@@ -1636,13 +1720,27 @@ function bindColors(root, cb) {
 function onboarding() {
   let color = COLORS[Math.floor(Math.random() * COLORS.length)]
   modal(`<div class="mh"><h2>Kanka Chat'e hoş geldin!</h2><p>Arkadaşlarının seni göreceği adı seç. Hesap yok, şifre yok.</p></div>
-    <form class="mb" id="ob"><div class="field"><label>Kullanıcı adı</label><input class="inp" name="n" maxlength="32" required placeholder="ör. Ali"></div>
-    <div class="field"><label>Renk</label>${colorPicker(color)}</div><button class="btn full">Devam et</button></form>`, root => {
+    <form class="mb" id="ob"><div class="field"><label>Kullanıcı adı</label><input class="inp" name="n" maxlength="32" placeholder="ör. Ali"></div>
+    <div class="field"><label>Renk</label>${colorPicker(color)}</div><button class="btn full">Devam et</button>
+    <details class="restore"><summary>Başka bir bilgisayarda hesabın mı var?</summary>
+      <div class="field"><label>Hesap yedek kodu</label><input class="inp" name="code" placeholder="KANKA1-…"></div>
+      <div class="hint">Diğer bilgisayarda ⚙️ Ayarlar → Profil → “Hesap yedeği”nden kopyala. Adın, kimliğin ve sunucuların buraya gelir.</div>
+      <button type="button" class="btn green full" id="ob-restore">Hesabımı getir</button>
+    </details></form>`, root => {
     bindColors(root, c => { color = c })
-    root.querySelector('#ob').addEventListener('submit', e => {
+    const f = root.querySelector('#ob')
+    root.querySelector('#ob-restore').addEventListener('click', () => {
+      const acc = parseAccountCode(f.code.value)
+      if (!acc) { toast('Yedek kodu geçersiz. Kodun tamamını kopyaladığından emin ol.'); return }
+      applyAccount(acc)
+      closeModal()
+      boot()
+      toast(`Tekrar hoş geldin, ${acc.name}!`)
+    })
+    f.addEventListener('submit', e => {
       e.preventDefault()
-      const n = clamp(e.target.n.value.trim(), 32)
-      if (!n) return
+      const n = clamp(f.n.value.trim(), 32)
+      if (!n) { f.n.focus(); return }
       S.me = {uid: rid(16), name: n, color}
       LS.set('kd_me', S.me)
       closeModal()
@@ -1778,6 +1876,12 @@ async function settingsModal(tab = 'profile') {
       <div data-pane="profile">
         <div class="field"><label>Kullanıcı adı</label><input class="inp" name="name" maxlength="32" value="${esc(S.me.name)}"></div>
         <div class="field"><label>Renk</label>${colorPicker(color)}</div>
+        <div class="field"><label>Hesap yedeği</label>
+          <div class="hint" style="margin:0 0 8px">Hesabın bu bilgisayarda kalıcı olarak saklanır. Başka bir bilgisayara veya tarayıcıya taşımak için bu kodu orada “Başka bir bilgisayarda hesabın mı var?” bölümüne yapıştır. Kod şifre gibidir, kimseyle paylaşma.</div>
+          <div class="copy"><input class="inp" readonly id="acc-code"><button type="button" class="btn" id="acc-copy">Kopyala</button></div>
+          <div class="copy" style="margin-top:8px"><input class="inp" id="acc-in" placeholder="Başka cihazdan gelen yedek kodu"><button type="button" class="btn sec" id="acc-load" style="border:1px solid var(--line)">Yükle</button></div>
+        </div>
+        <button type="button" class="btn green" id="inst">💻 Uygulamayı bilgisayara yükle</button>
       </div>
       <div data-pane="voice">
         <div class="field"><label>Mikrofon</label><select class="inp" name="mic">${opts('audioinput', s.mic)}</select></div>
@@ -1828,6 +1932,19 @@ async function settingsModal(tab = 'profile') {
     S.modalCleanup = () => clearInterval(iv)
     sens.addEventListener('input', () => { s.sens = +sens.value })
     root.querySelector('[data-close]').addEventListener('click', closeModal)
+    root.querySelector('#acc-code').value = accountCode()
+    root.querySelector('#acc-copy').addEventListener('click', () => copy(accountCode()))
+    const inst = root.querySelector('#inst')
+    inst.hidden = matchMedia('(display-mode: standalone)').matches
+    inst.addEventListener('click', installApp)
+    root.querySelector('#acc-load').addEventListener('click', () => {
+      const acc = parseAccountCode(root.querySelector('#acc-in').value)
+      if (!acc) { toast('Yedek kodu geçersiz.'); return }
+      if (acc.uid !== S.me.uid && !confirm(`Bu bilgisayardaki hesap “${acc.name}” hesabıyla değiştirilsin mi? Sunucuların korunur ve yenileri eklenir.`)) return
+      applyAccount(acc)
+      flushSave()
+      location.reload()
+    })
     root.querySelector('#wipe').addEventListener('click', () => {
       if (!confirm('Tüm sunucular, mesajlar ve profilin bu tarayıcıdan silinsin mi?')) return
       try { for (const k of Object.keys(localStorage)) if (k.startsWith('kd_')) localStorage.removeItem(k) } catch {}
@@ -1887,12 +2004,17 @@ function profilePop(uid, anchor) {
   const isMe = uid === S.me.uid
   const u = isMe ? {n: S.me.name, c: S.me.color} : knownUser(uid)
   const on = isMe || !!onlineUser(uid)
-  const inVoice = !isMe && S.voice && voicePeers().some(pid => S.conns[S.voice.sid].peers[pid].uid === uid)
+  const vpid = !isMe && S.voice ? voicePeers().find(pid => S.conns[S.voice.sid].peers[pid].uid === uid) : null
+  const inVoice = !!vpid
+  const streaming = inVoice && S.voice.watching.has(vpid)
   pop(`<div class="prof"><div class="ph">${avatar(u.n, u.c, 's80', `<span class="dot${on ? '' : ' off'}"></span>`)}<div class="pn">${esc(u.n)}</div><div class="uid">${on ? 'Çevrimiçi' : 'Çevrimdışı'}</div></div>
     ${inVoice ? `<div style="padding:0 8px 8px"><div class="lbl2">Kullanıcı ses seviyesi</div><input type="range" min="0" max="100" value="${Math.round(volOf(uid) * 100)}" data-vol="${esc(uid)}"></div>` : ''}
+    ${streaming ? `<div style="padding:0 8px 8px"><div class="lbl2">Yayın (oyun) ses seviyesi</div><input type="range" min="0" max="100" value="${Math.round(svolOf(uid) * 100)}" data-svol="1"></div>` : ''}
     <div class="menu">${isMe ? '<button data-act="settings">Profili düzenle</button>' : `<button data-act="dm" data-uid="${esc(uid)}">Mesaj gönder</button>`}</div></div>`, anchor)
   const r = $('#pop input[data-vol]')
   r?.addEventListener('input', () => { S.vol[uid] = r.value / 100; LS.set('kd_vol', S.vol); applyAudio() })
+  const sr = $('#pop input[data-svol]')
+  sr?.addEventListener('input', () => { S.svol[uid] = sr.value / 100; LS.set('kd_svol', S.svol); applyAudio() })
 }
 function emojiPop(anchor, cb) {
   pop(`<div class="emojis">${EMOJI.map(e => `<button data-emo="${e}">${e}</button>`).join('')}</div>`, anchor)
@@ -1954,6 +2076,7 @@ function onClick(e) {
     case 'home': go(null, S.dms[0] || null); break
     case 'srv': go(t.dataset.sid); break
     case 'new-srv': newServerModal(); break
+    case 'install': installApp(); break
     case 'join-srv': joinServerModal(); break
     case 'ch': if (!e.target.closest('[data-act="ch-menu"]')) go(S.view.sid, t.dataset.cid); break
     case 'ch-menu': {
@@ -2135,8 +2258,112 @@ function checkHashInvite() {
   if (inv && S.me) joinServer(inv)
 }
 
+// ======================= hesabın kalıcılığı =======================
+// Hesap (kimlik, ad, sunucular) üç yerde tutulur: localStorage, IndexedDB ve çerez.
+// Biri silinse bile diğerinden geri yüklenir. Yedek koduyla başka cihaza da taşınabilir.
+// (Durum fonksiyon özelliklerinde tutulur: LS.set modül yüklenirken de güvenle çağrılabilsin)
+function idb() {
+  if (!idb.p) {
+    idb.p = new Promise(res => {
+      try {
+        const r = indexedDB.open('kanka-chat', 1)
+        r.onupgradeneeded = () => r.result.createObjectStore('kv')
+        r.onsuccess = () => res(r.result)
+        r.onerror = () => res(null)
+      } catch { res(null) }
+    })
+  }
+  return idb.p
+}
+function mirror(k, v) {
+  idb().then(db => { try { db?.transaction('kv', 'readwrite').objectStore('kv').put(v, k) } catch {} })
+  if (k === 'kd_me' || k === 'kd_servers') { clearTimeout(mirror.t); mirror.t = setTimeout(writeAccCookie, 500) }
+}
+function idbAll() {
+  return idb().then(db => new Promise(res => {
+    const out = {}
+    if (!db) return res(out)
+    try {
+      const req = db.transaction('kv').objectStore('kv').openCursor()
+      req.onsuccess = () => { const c = req.result; if (c) { out[c.key] = c.value; c.continue() } else res(out) }
+      req.onerror = () => res(out)
+    } catch { res(out) }
+  }))
+}
+const b64e = str => { let b = ''; for (const x of new TextEncoder().encode(str)) b += String.fromCharCode(x); return btoa(b).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '') }
+const b64d = str => new TextDecoder().decode(Uint8Array.from(atob(str.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0)))
+function accountCode(maxLen = Infinity) {
+  const d = {u: S.me.uid, n: S.me.name, c: S.me.color, s: S.servers.map(x => [x.id, x.key, x.name])}
+  let code = 'KANKA1-' + b64e(JSON.stringify(d))
+  while (code.length > maxLen && d.s.length) { d.s.pop(); code = 'KANKA1-' + b64e(JSON.stringify(d)) }
+  return code
+}
+function parseAccountCode(str) {
+  const m = String(str || '').match(/KANKA1-([A-Za-z0-9_-]+)/)
+  if (!m) return null
+  try {
+    const d = JSON.parse(b64d(m[1]))
+    if (typeof d.u !== 'string' || !/^[a-z0-9]{8,40}$/.test(d.u)) return null
+    return {
+      uid: d.u, name: clamp(d.n, 32) || 'Kanka', color: isColor(d.c) ? d.c : COLORS[0],
+      servers: (Array.isArray(d.s) ? d.s : []).filter(x => Array.isArray(x) && /^[a-z0-9]{6,20}$/.test(x[0]) && /^[a-z0-9]{12,40}$/.test(x[1])).slice(0, 100)
+    }
+  } catch { return null }
+}
+function applyAccount(acc) {
+  S.me = {uid: acc.uid, name: acc.name, color: acc.color}
+  LS.set('kd_me', S.me)
+  for (const [id, key, name] of acc.servers) {
+    if (!srvById(id)) S.servers.push({id, key, name: clamp(name, 50) || 'Sunucu', owner: '', ver: 0, mem: {}, ch: []})
+  }
+  saveServers()
+}
+function writeAccCookie() {
+  if (!S.me) return
+  try { document.cookie = `kd_acc=${accountCode(3500)}; max-age=${400 * 86400}; path=/; SameSite=Lax${location.protocol === 'https:' ? '; Secure' : ''}` } catch {}
+}
+function readAccCookie() {
+  try { const m = document.cookie.match(/(?:^|;\s*)kd_acc=([^;]+)/); return m ? parseAccountCode(m[1]) : null } catch { return null }
+}
+async function restoreAccount() {
+  const all = await idbAll()
+  if (all.kd_me && typeof all.kd_me.uid === 'string') {
+    for (const k of MIRROR) if (all[k] != null) { try { localStorage.setItem(k, JSON.stringify(all[k])) } catch {} }
+    S.me = all.kd_me
+    if (Array.isArray(all.kd_servers)) S.servers = all.kd_servers
+    if (all.kd_set) Object.assign(S.settings, all.kd_set)
+    if (Array.isArray(all.kd_dms)) S.dms = all.kd_dms
+    if (all.kd_vol) S.vol = all.kd_vol
+    if (all.kd_svol) S.svol = all.kd_svol
+    if (all.kd_lastch) S.lastCh = all.kd_lastch
+    return true
+  }
+  const acc = readAccCookie()
+  if (acc) { applyAccount(acc); return true }
+  return false
+}
+function persistAll() {
+  // Tarayıcıdan bu sitenin verilerini kendiliğinden silmemesini iste
+  navigator.storage?.persist?.().catch(() => {})
+  for (const k of MIRROR) { const v = LS.get(k, null); if (v != null) mirror(k, v) }
+}
+// Bilgisayara uygulama olarak yükleme (kurulan uygulamaların verisi kalıcı tutulur)
+let installEvt = null
+addEventListener('beforeinstallprompt', e => { e.preventDefault(); installEvt = e; inv('rail') })
+addEventListener('appinstalled', () => { installEvt = null; toast('Kanka Chat bilgisayarına yüklendi; masaüstünden veya başlat menüsünden açabilirsin.'); inv('rail') })
+async function installApp() {
+  if (!installEvt) { toast('Tarayıcının adres çubuğundaki “Yükle” simgesinden veya menüsünden “Uygulamayı yükle”yi seçebilirsin.'); return }
+  const e = installEvt
+  installEvt = null
+  e.prompt()
+  try { await e.userChoice } catch {}
+  inv('rail')
+}
+
 // ======================= başlangıç =======================
 function boot() {
+  persistAll()
+  if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {})
   // Donanım codec'lerini tespit et, sonra eşlere bildir
   probeCodecs().then(() => { for (const c of Object.values(S.conns)) c.a.hello.send(helloData(c.sid)) })
   for (const s of S.servers) connect(s)
@@ -2151,4 +2378,8 @@ function boot() {
   }, 15000)
 }
 bind()
-if (!S.me) onboarding(); else boot()
+;(async () => {
+  // localStorage silinmişse hesabı IndexedDB'den veya çerezden geri getir
+  if (!S.me) await restoreAccount()
+  if (!S.me) onboarding(); else boot()
+})()

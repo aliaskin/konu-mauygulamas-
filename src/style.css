@@ -215,7 +215,7 @@ a:hover { text-decoration: underline; }
 .qb { position: absolute; left: 8px; top: 8px; z-index: 1; background: rgba(0,0,0,.6); color: #e3e5e8; font-size: 11px; font-variant-numeric: tabular-nums; padding: 3px 7px; border-radius: 4px; max-width: calc(100% - 120px); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; pointer-events: none; }
 .qb.warn { background: rgba(240,178,50,.9); color: #1e1f22; white-space: normal; }
 .seg { display: flex; gap: 6px; flex-wrap: wrap; }
-.seg button { flex: 1; min-width: 90px; padding: 10px 8px; border-radius: 6px; background: var(--deep); border: 2px solid transparent; font-weight: 600; font-size: 14px; display: flex; flex-direction: column; align-items: center; gap: 2px; }
+.seg button { flex: 1; min-width: 72px; padding: 10px 8px; border-radius: 6px; background: var(--deep); border: 2px solid transparent; font-weight: 600; font-size: 14px; display: flex; flex-direction: column; align-items: center; gap: 2px; }
 .seg button small { font-weight: 400; font-size: 11px; color: var(--muted); }
 .seg button:hover { background: var(--hover); }
 .seg button.on { border-color: var(--accent); background: rgba(88,101,242,.15); }
@@ -307,3 +307,6 @@ input[type=range] { width: 100%; accent-color: var(--accent); }
   .ctrl button { width: 46px; height: 46px; }
 }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+.restore { margin-top: 16px; border-top: 1px solid var(--line); padding-top: 12px; }
+.restore summary { cursor: pointer; color: #00a8fc; font-size: 14px; }
+.restore summary:hover { text-decoration: underline; }
