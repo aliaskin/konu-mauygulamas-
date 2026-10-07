@@ -15,13 +15,24 @@ Mesajlar, ses ve görüntü doğrudan arkadaşlarının cihazlarına (P2P, WebRT
 - **Sesli sohbet**: gürültü/yankı engelleme, konuşan kişinin yeşil çerçevesi, sustur/sağırlaştır, bas-konuş (push-to-talk),
   kişi başı ses seviyesi, giriş hassasiyeti
 - **Görüntülü sohbet**: kamera aç/kapa, tıkla büyüt, tam ekran
-- **Ekran paylaşımı**: sistem sesiyle birlikte; “Netlik” (yazı/kod) veya “Akıcılık” (oyun) modu
+- **Ekran paylaşımı**: 720p / 1080p / 1440p, 30 / 60 / **120 FPS**, “Oyun/Video” (akıcılık) veya “Yazı/Kod” (netlik) modu,
+  stereo ve yüksek kaliteli bilgisayar sesi, yayın sırasında kesintisiz kalite değiştirme, tam ekran ve resim içinde resim,
+  kutucukta canlı kalite göstergesi (çözünürlük · FPS · codec · bit hızı)
 - Mobil uyumlu arayüz
 
 ## Performans (PC'yi yormaması için)
 
 - Framework yok: saf JavaScript, tek dosya (~155 KB), boşta neredeyse sıfır CPU
-- Ekran yayını yalnızca **“Yayını İzle”ye basan** kişilere gönderilir (Discord gibi) — izlemeyenin bant genişliği ve CPU'su harcanmaz
+- **Donanım kodlama**: tarayıcıya hangi codec'leri ekran kartıyla kodlayıp çözebildiği sorulur (AV1 › VP9 › H.264);
+  yayın, hem yayıncının GPU'suyla kodlanabilen hem de izleyicinin GPU'suyla çözülebilen codec ile gönderilir
+- Ekran yayını yalnızca **“Yayını İzle”ye basan** kişilere gönderilir (Discord gibi); kimse izlemiyorsa hiç kodlama yapılmaz
+- **İzleyiciye göre kalite**: yayın büyük/tam ekransa tam kalite, ızgarada orta boy kutucuksa 720p/60, küçükse 360p/30,
+  alt şeritte küçük resimse 360p/15 gönderilir. İzleyici sohbete geçerse veya sekmeyi kapatırsa o kişi için kodlama tamamen durur
+  (ses devam eder), geri dönünce anında devam eder
+- İzleyici sayısı arttıkça (her izleyici ayrı kodlama demek) yayıncının bilgisayarı yorulmasın diye FPS kademeli olarak sınırlanır
+- Yayıncının kendi önizlemesi 15 FPS'lik hafif bir kopyadır; tam kaliteyi kendine göstermek için GPU harcanmaz
+- Bit hızı çözünürlük, FPS, codec verimliliği ve içerik türüne göre hesaplanır; ağ ya da işlemci yetmezse tarayıcı otomatik
+  düşürür ve kutucukta uyarı gösterilir
 - Kamera/ekran için bit hızı ve FPS sınırları; kişi sayısı arttıkça kamera kalitesi otomatik düşer
 - Konuşma algılama yalnızca kendi mikrofonunu analiz eder (saniyede 10 kez), başkalarının sesi tekrar işlenmez
 - Ses odası görünümü kapalıyken video çözülmez; mesaj listesi sınırlı sayıda öğe çizer
@@ -59,5 +70,5 @@ npm run build   # src/ → docs/index.html
 npx serve docs  # http://localhost:3000
 ```
 
-Kaynaklar: `src/main.js` (uygulama), `src/style.css` (tema), `src/index.html` (iskelet), `build.mjs` (tek dosyaya paketleme).
-Özel Nostr röleleri için: `index.html?relay=wss://röle1,wss://röle2`.
+Kaynaklar: `src/main.js` (uygulama), `src/media.js` (codec seçimi, SDP ayarları, yayın bit hızı ve istatistikler), `src/style.css` (tema), `src/index.html` (iskelet), `build.mjs` (tek dosyaya paketleme).
+Özel Nostr röleleri için: `index.html?relay=wss://röle1,wss://röle2`. Codec'i zorlamak için: `?codec=AV1` (veya `VP9`, `H264`, `VP8`).
