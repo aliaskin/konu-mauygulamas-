@@ -23,6 +23,10 @@ const MAX_FILE = 100 * 1024 * 1024
 // İsteğe bağlı: ?relay=wss://a,wss://b ile özel Nostr röleleri kullan
 const RELAYS = (new URLSearchParams(location.search).get('relay') || '').split(',').filter(u => /^wss?:\/\//.test(u))
 const PAGE = 80
+// Masaüstü uygulamasının (Electron) köprüsü; tarayıcıda yoktur
+const DESK = window.kankaDesktop || null
+const DESKTOP_URL = 'https://github.com/aliaskin/konu-mauygulamas-/releases/latest/download/KankaChat-Setup.exe'
+const isWindows = /Windows/i.test(navigator.userAgent)
 // Hesap ve ayarlar ayrıca IndexedDB'ye (ve kimlik + sunucular çereze) yansıtılır; biri silinirse diğerinden dönülür
 const MIRROR = new Set(['kd_me', 'kd_servers', 'kd_set', 'kd_dms', 'kd_vol', 'kd_svol', 'kd_lastch', 'kd_st'])
 const LS = {
@@ -761,7 +765,8 @@ function renderRail() {
   }
   h += '<button class="srv add" data-act="new-srv" title="Sunucu oluştur">＋</button>'
   h += '<button class="srv add" data-act="join-srv" title="Sunucuya katıl" style="font-size:20px">🔗</button>'
-  if (installEvt) h += '<button class="srv add" data-act="install" title="Uygulamayı bilgisayara yükle" style="font-size:20px">💻</button>'
+  if (!DESK && isWindows) h += '<button class="srv add" data-act="settings" data-tab="desktop" title="Windows uygulamasını indir" style="font-size:20px">💻</button>'
+  else if (!DESK && installEvt) h += '<button class="srv add" data-act="install" title="Uygulamayı bilgisayara yükle" style="font-size:20px">💻</button>'
   $('#rail').innerHTML = h
 }
 function voiceUsers(sid, cid) {
@@ -888,7 +893,7 @@ function homeHtml() {
     <div style="display:flex;gap:8px;justify-content:center;margin-top:20px;flex-wrap:wrap">
       <button class="btn" data-act="new-srv">Sunucu Oluştur</button>
       <button class="btn green" data-act="join-srv">Sunucuya Katıl</button>
-    </div></div>`
+    </div>${!DESK && isWindows ? '<p style="margin-top:18px"><button class="btn sec" data-act="settings" data-tab="desktop">💻 Windows uygulamasını indir: oyun içinde bas-konuş ve daha fazlası</button></p>' : ''}</div>`
 }
 function renderMain() {
   renderHead()
@@ -909,6 +914,15 @@ function updateTitle() {
   let n = 0
   for (const u of Object.values(S.unread)) n += u.m
   document.title = (n ? `(${n}) ` : '') + 'Kanka Chat'
+  // Masaüstü uygulaması: tepsi menüsü, görev çubuğu rozeti
+  if (DESK) {
+    const st = {muted: !!S.st.m, deafened: !!S.st.d, inVoice: !!S.voice, unread: n}
+    const sig = JSON.stringify(st)
+    if (sig !== S.deskSig) { S.deskSig = sig; DESK.setState(st) }
+  }
+}
+function syncDesktop() {
+  DESK?.setPtt({enabled: !!S.settings.ptt, key: S.settings.pttKey})
 }
 
 // ======================= gezinme =======================
@@ -1352,7 +1366,7 @@ function goLiveModal() {
       ${switchRow('scursor', s.scursor, '🖱️ Fare imlecini yayında gösterme')}
       ${cursorSupported() ? '' : '<div class="hint" style="margin-top:0">Bu tarayıcı imleci yayından henüz kendisi kaldıramıyor. Oyunda fare ortada görünüyorsa oyunun görüntü ayarını <b>“Kenarlıksız” / “Pencereli tam ekran”</b> (Borderless / Windowed Fullscreen) yap: bu modda oyun imleci kendisi gizler, yayında da görünmez. Nişangâh etkilenmez.</div>'}
       ${live ? '' : switchRow('saudio', s.saudio, '🔊 Oyun / bilgisayar sesini de paylaş')}
-      ${live ? '' : '<div class="hint" style="margin-top:0">Oyun sesi için açılan pencerede <b>“Tüm ekran”</b> sekmesini seç ve alttaki <b>“Sistem sesini de paylaş”</b> kutusunu işaretle (Windows, Chrome/Edge). Tarayıcı sekmesi paylaşırken “Sekme sesini de paylaş”ı işaretle. Tek bir pencere paylaşılırken tarayıcılar ses vermez.</div>'}
+      ${live ? '' : DESK ? '<div class="hint" style="margin-top:0">Sıradaki pencerede ekranı veya oyunu seç; “Bilgisayar sesini de paylaş” açıkken oyun sesi otomatik alınır.</div>' : '<div class="hint" style="margin-top:0">Oyun sesi için açılan pencerede <b>“Tüm ekran”</b> sekmesini seç ve alttaki <b>“Sistem sesini de paylaş”</b> kutusunu işaretle (Windows, Chrome/Edge). Tarayıcı sekmesi paylaşırken “Sekme sesini de paylaş”ı işaretle. Tek bir pencere paylaşılırken tarayıcılar ses vermez.</div>'}
       <div class="hint">🖥️ Bu ekranın çözünürlüğü: <b>${Math.round(screen.width * (devicePixelRatio || 1))}×${Math.round(screen.height * (devicePixelRatio || 1))}</b>${screen.height * (devicePixelRatio || 1) >= 2100 ? ' (4K, “Kaynak” 4K yayın yapar)' : '. 4K yayın için 4K ekran gerekir; büyütmek netlik katmaz.'}</div>
       <div class="hint">${hw}<br>“Kaynak”, ekranın kendi çözünürlüğüdür (ör. 1440p, 4K) ve en net görüntüyü verir. Her izleyiciye, ekranında gösterebileceğinden daha büyük görüntü gönderilmez; kimse izlemiyorsa hiç kodlama yapılmaz. 120 FPS'i görmek için izleyicinin ekranı 120 Hz olmalı.</div>
     </div>
@@ -2292,7 +2306,9 @@ function leaveServer(srv) {
   go(null, null)
 }
 
-const keyName = code => !code ? '—' : code.replace(/^Key/, '').replace(/^Digit/, '').replace(/^Arrow/, 'Ok ').replace('Backquote', '`')
+const MOUSE_NAMES = {Mouse3: 'Fare orta tuşu', Mouse4: 'Fare 4 (geri)', Mouse5: 'Fare 5 (ileri)'}
+const mouseCode = button => ({1: 'Mouse3', 3: 'Mouse4', 4: 'Mouse5'})[button] || null
+const keyName = code => !code ? '—' : MOUSE_NAMES[code] || code.replace(/^Key/, '').replace(/^Digit/, '').replace(/^Arrow/, 'Ok ').replace('Backquote', '`').replace(/^Control(Left|Right)$/, 'Ctrl').replace(/^Shift(Left|Right)$/, 'Shift').replace(/^Alt(Left|Right)$/, 'Alt')
 async function settingsModal(tab = 'profile') {
   const s = S.settings
   let devs = []
@@ -2301,7 +2317,7 @@ async function settingsModal(tab = 'profile') {
   const sw = (name, on, label) => `<label class="row"><span>${label}</span><span class="sw"><input type="checkbox" name="${name}"${on ? ' checked' : ''}><i></i></span></label>`
   let color = S.me.color
   modal(`<div class="mh"><h2>Ayarlar</h2></div><div class="mb">
-    <div class="tabs"><button data-tab="profile">Profil</button><button data-tab="voice">Ses</button><button data-tab="video">Görüntü</button><button data-tab="notif">Bildirimler</button><button data-tab="about">Hakkında</button></div>
+    <div class="tabs"><button data-tab="profile">Profil</button><button data-tab="voice">Ses</button><button data-tab="video">Görüntü</button><button data-tab="notif">Bildirimler</button><button data-tab="desktop">${DESK ? 'Masaüstü' : '💻 Uygulama'}</button><button data-tab="about">Hakkında</button></div>
     <form id="st">
       <div data-pane="profile">
         <div class="field"><label>Kullanıcı adı</label><input class="inp" name="name" maxlength="32" value="${esc(S.me.name)}"></div>
@@ -2334,6 +2350,22 @@ async function settingsModal(tab = 'profile') {
         ${sw('notif', s.notif, 'Masaüstü bildirimleri (DM ve @bahsetmeler)')}
         ${sw('members', s.members, 'Üye listesini göster')}
       </div>
+      <div data-pane="desktop">${DESK ? `
+        <label class="row"><span>Bilgisayar açılınca başlat (arka planda)</span><span class="sw"><input type="checkbox" id="d-auto"><i></i></span></label>
+        <label class="row"><span>Kapatınca sistem tepsisine küçült</span><span class="sw"><input type="checkbox" id="d-tray"><i></i></span></label>
+        <label class="row"><span>Genel kısayollar: <b>Ctrl+Shift+M</b> mikrofon, <b>Ctrl+Shift+D</b> sağırlaştır</span><span class="sw"><input type="checkbox" id="d-keys"><i></i></span></label>
+        <div class="hint" id="d-info">Bas-konuş tuşu (Ses sekmesi) bu uygulamada oyun öndeyken de çalışır. Ekran paylaşırken bilgisayar sesi otomatik alınır.</div>` : `
+        <p class="hint" style="font-size:14px">Kanka Chat'in Windows uygulaması tarayıcının yapamadıklarını ekler:</p>
+        <ul class="hint" style="font-size:13px;line-height:1.7;padding-left:18px">
+          <li><b>Bas-konuş oyun içindeyken de çalışır</b> (klavye tuşu veya fare yan tuşu)</li>
+          <li>Oyundayken <b>Ctrl+Shift+M</b> ile mikrofon, <b>Ctrl+Shift+D</b> ile sağırlaştırma</li>
+          <li>Ekran paylaşırken oyun sesi kutucuk işaretlemeden otomatik alınır</li>
+          <li>Sistem tepsisi, bilgisayarla başlama, görev çubuğunda bildirim rozeti</li>
+          <li>Hep güncel: arayüz her açılışta en son sürümle yüklenir</li>
+        </ul>
+        <a class="btn green" href="${DESKTOP_URL}" target="_blank" rel="noopener" style="display:inline-block;margin-top:6px">⬇️ Windows uygulamasını indir</a>
+        <p class="hint">İndirdikten sonra çalıştır; Windows “bilinmeyen yayıncı” uyarısı verirse “Ek bilgi” → “Yine de çalıştır”. Uygulamada hesabını taşımak için Profil → Hesap yedeği kodunu kullan.</p>`}
+      </div>
       <div data-pane="about"><p class="hint" style="font-size:14px">Kanka Chat tamamen tarayıcında çalışır. Sunucu yoktur: mesajlar, ses ve görüntü doğrudan cihazlar arasında (WebRTC) uçtan uca şifreli gider. Mesaj geçmişi her kullanıcının tarayıcısında saklanır ve çevrimiçi olan üyeler arasında eşitlenir.</p>
       <p class="hint">Kimliğin: <code>${esc(S.me.uid)}</code></p>
       <button type="button" class="btn red" id="wipe">Tüm yerel verileri sil</button></div>
@@ -2350,9 +2382,11 @@ async function settingsModal(tab = 'profile') {
     let pttKey = s.pttKey
     const kb = root.querySelector('#pttk')
     kb.addEventListener('click', () => {
-      kb.textContent = 'Bir tuşa bas…'
-      const h = e => { e.preventDefault(); pttKey = e.code; kb.textContent = keyName(pttKey); removeEventListener('keydown', h, true) }
-      addEventListener('keydown', h, true)
+      kb.textContent = 'Bir tuşa veya fare yan tuşuna bas…'
+      const done = code => { pttKey = code; kb.textContent = keyName(pttKey); removeEventListener('keydown', hk, true); removeEventListener('mousedown', hm, true) }
+      const hk = e => { e.preventDefault(); done(e.code) }
+      const hm = e => { const c = mouseCode(e.button); if (c) { e.preventDefault(); done(c) } }
+      setTimeout(() => { addEventListener('keydown', hk, true); addEventListener('mousedown', hm, true) }, 0)
     })
     const lvl = root.querySelector('#lvl'), sens = f.sens
     const iv = setInterval(() => {
@@ -2363,6 +2397,19 @@ async function settingsModal(tab = 'profile') {
     S.modalCleanup = () => clearInterval(iv)
     sens.addEventListener('input', () => { s.sens = +sens.value })
     root.querySelector('[data-close]').addEventListener('click', closeModal)
+    if (DESK) {
+      DESK.getPrefs().then(pr => {
+        if (!pr) return
+        root.querySelector('#d-auto').checked = !!pr.autoStart
+        root.querySelector('#d-tray').checked = !!pr.closeToTray
+        root.querySelector('#d-keys').checked = !!pr.hotkeys
+        if (!pr.globalPtt) root.querySelector('#d-info').textContent = 'Genel bas-konuş bu sistemde kullanılamıyor; bas-konuş yalnızca pencere öndeyken çalışır.'
+        if (pr.version) root.querySelector('#d-info').textContent += ` Uygulama sürümü ${pr.version}.`
+      }).catch(() => {})
+      root.querySelector('#d-auto').addEventListener('change', e => DESK.setPref('autoStart', e.target.checked))
+      root.querySelector('#d-tray').addEventListener('change', e => DESK.setPref('closeToTray', e.target.checked))
+      root.querySelector('#d-keys').addEventListener('change', e => DESK.setPref('hotkeys', e.target.checked))
+    }
     root.querySelector('#acc-code').value = accountCode()
     root.querySelector('#acc-copy').addEventListener('click', () => copy(accountCode()))
     const inst = root.querySelector('#inst')
@@ -2397,6 +2444,7 @@ async function settingsModal(tab = 'profile') {
       if (profChanged) for (const c of Object.values(S.conns)) c.a.hello.send(helloData(c.sid))
       if (S.voice && prevAudio !== [s.mic, s.ns, s.ec, s.agc].join()) await restartMic()
       applyMic()
+      syncDesktop()
       if (S.voice) for (const pid of voicePeers()) tune(pid)
       closeModal()
       invAll()
@@ -2546,7 +2594,7 @@ function onClick(e) {
       break
     }
     case 'prof': profilePop(t.dataset.uid, t); return
-    case 'settings': closePop(); settingsModal(t.dataset.tab === 'video' ? 'video' : 'profile'); break
+    case 'settings': closePop(); settingsModal(['video', 'desktop'].includes(t.dataset.tab) ? t.dataset.tab : 'profile'); break
     case 'mute': setMute(!S.st.m); break
     case 'deafen': setDeaf(!S.st.d); break
     case 'leave-voice': leaveVoice(); break
@@ -2666,7 +2714,14 @@ function bind() {
   addEventListener('keyup', e => {
     if (S.settings.ptt && e.code === S.settings.pttKey) { S.pttDown = false; applyMic() }
   })
-  addEventListener('blur', () => { if (S.pttDown) { S.pttDown = false; applyMic() } })
+  // Bas-konuş fare yan tuşlarıyla da çalışır (geri/ileri tuşunun sayfayı değiştirmesi engellenir)
+  addEventListener('mousedown', e => {
+    if (S.settings.ptt && S.voice && mouseCode(e.button) === S.settings.pttKey) { e.preventDefault(); S.pttDown = true; applyMic() }
+  })
+  addEventListener('mouseup', e => {
+    if (S.settings.ptt && mouseCode(e.button) === S.settings.pttKey) { e.preventDefault(); S.pttDown = false; applyMic() }
+  })
+  addEventListener('blur', () => { if (S.pttDown && !DESK) { S.pttDown = false; applyMic() } })
   addEventListener('resize', () => inv('stage'))
   document.addEventListener('fullscreenchange', updateWatchLevels)
   document.addEventListener('enterpictureinpicture', updateWatchLevels, true)
@@ -2799,6 +2854,12 @@ async function installApp() {
 // ======================= başlangıç =======================
 function boot() {
   persistAll()
+  if (DESK) {
+    // Oyun öndeyken bile çalışan kısayollar ve bas-konuş (masaüstü uygulaması)
+    DESK.onHotkey(n => { if (n === 'mute') setMute(!S.st.m); else if (n === 'deafen') setDeaf(!S.st.d) })
+    DESK.onPtt(down => { if (S.pttDown !== down) { S.pttDown = down; applyMic() } })
+    syncDesktop()
+  }
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {})
   // Donanım codec'lerini tespit et, sonra eşlere bildir
   probeCodecs().then(() => { for (const c of Object.values(S.conns)) c.a.hello.send(helloData(c.sid)) })

@@ -31,6 +31,23 @@ Mesajlar, ses ve görüntü doğrudan arkadaşlarının cihazlarına (P2P, WebRT
 - **Bilgisayara yüklenebilir uygulama**: soldaki 💻 butonu veya tarayıcının “Yükle” simgesi; masaüstünden ayrı pencerede açılır
 - Mobil uyumlu arayüz
 
+## 💻 Windows uygulaması
+
+**İndir:** https://github.com/aliaskin/konu-mauygulamas-/releases/latest/download/KankaChat-Setup.exe
+(kurulumsuz tek dosya: `KankaChat-Portable.exe`, Linux: `KankaChat.AppImage`, hepsi [Releases](https://github.com/aliaskin/konu-mauygulamas-/releases/latest) sayfasında)
+
+Tarayıcının yapamadıklarını ekler:
+- **Bas-konuş oyun içindeyken de çalışır**: klavye tuşu veya fare yan tuşu (Ayarlar → Ses → Bas-konuş)
+- **Genel kısayollar**: oyundayken `Ctrl+Shift+M` mikrofon, `Ctrl+Shift+D` sağırlaştır
+- **Kendi ekran seçicisi**: oyun sesi kutucuk işaretlemeden otomatik alınır (Windows), sohbet sesleri yankı korumasıyla temizlenir
+- Sistem tepsisi (kapatınca arka planda çalışır), bilgisayar açılınca başlama, görev çubuğunda bahsetme rozeti
+- Küçültülünce yavaşlamaz; dizüstülerde yayın için harici ekran kartını kullanır
+- **Hep güncel**: arayüz her açılışta web sürümünden yüklenir, yeni özellikler yeniden kurmadan gelir
+
+Kod imzası olmadığı için Windows ilk açılışta “bilinmeyen yayıncı” uyarısı verebilir: **Ek bilgi → Yine de çalıştır**.
+Uygulama ayrı bir depolama kullanır; tarayıcıdaki hesabını taşımak için Ayarlar → Profil → **Hesap yedeği** kodunu kullan.
+Kaynak: `desktop/` (Electron). Yerelde çalıştırmak için `cd desktop && npm install && npm start`.
+
 ## Performans (PC'yi yormaması için)
 
 - Framework yok: saf JavaScript, tek dosya (~155 KB), boşta neredeyse sıfır CPU

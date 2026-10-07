@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="tr">
+<head>
+<meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; img-src data:; style-src 'unsafe-inline'; script-src 'unsafe-inline'">
+<title>Ekran paylaş</title>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #313338; --side: #2b2d31; --deep: #1e1f22; --hover: #35373c; --sel: #404249;
+    --text: #dbdee1; --head: #f2f3f5; --muted: #949ba4; --accent: #5865f2; --accent-h: #4752c4; --green: #23a55a;
+    font-family: "gg sans", "Segoe UI", system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text); font-size: 14px; overflow: hidden; }
+  body { display: flex; flex-direction: column; }
+  header { padding: 18px 20px 0; }
+  h1 { margin: 0 0 4px; font-size: 20px; color: var(--head); }
+  .sub { color: var(--muted); font-size: 13px; }
+  .tabs { display: flex; gap: 4px; margin-top: 14px; border-bottom: 1px solid #3f4147; }
+  .tabs button { background: none; border: 0; color: var(--muted); font: inherit; font-weight: 600; padding: 8px 12px; cursor: pointer; border-bottom: 2px solid transparent; }
+  .tabs button.on { color: var(--head); border-bottom-color: var(--accent); }
+  main { flex: 1; overflow-y: auto; padding: 16px 20px; }
+  .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+  .card { background: var(--side); border: 2px solid transparent; border-radius: 8px; padding: 8px; cursor: pointer; text-align: left; color: inherit; font: inherit; }
+  .card:hover { background: var(--hover); }
+  .card.on { border-color: var(--accent); background: var(--sel); }
+  .card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .thumb { aspect-ratio: 16 / 9; width: 100%; background: var(--deep); border-radius: 4px; display: grid; place-items: center; overflow: hidden; }
+  .thumb img { width: 100%; height: 100%; object-fit: contain; }
+  .name { display: flex; gap: 6px; align-items: center; margin-top: 8px; font-weight: 500; overflow: hidden; }
+  .name img { width: 16px; height: 16px; flex: none; }
+  .name span { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .empty { color: var(--muted); padding: 40px 0; text-align: center; }
+  footer { display: flex; align-items: center; gap: 12px; padding: 14px 20px; background: var(--side); }
+  .sw { display: flex; align-items: center; gap: 10px; cursor: pointer; user-select: none; flex: 1; min-width: 0; }
+  .sw input { display: none; }
+  .sw i { width: 40px; height: 24px; border-radius: 12px; background: #80848e; position: relative; flex: none; transition: background .15s; }
+  .sw i::after { content: ""; position: absolute; width: 18px; height: 18px; left: 3px; top: 3px; border-radius: 50%; background: #fff; transition: transform .15s; }
+  .sw input:checked + i { background: var(--green); }
+  .sw input:checked + i::after { transform: translateX(16px); }
+  .sw small { display: block; color: var(--muted); font-size: 12px; }
+  .btn { border: 0; border-radius: 4px; padding: 10px 18px; font: 500 14px system-ui; cursor: pointer; color: #fff; background: var(--accent); }
+  .btn:hover { background: var(--accent-h); }
+  .btn:disabled { opacity: .5; cursor: not-allowed; }
+  .btn.sec { background: transparent; color: var(--text); }
+  .btn.sec:hover { text-decoration: underline; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Ekranını paylaş</h1>
+  <div class="sub">Tam ekran oyunlar için “Ekranlar” sekmesinden ekranı seç.</div>
+  <div class="tabs"><button data-tab="screen" class="on">Ekranlar</button><button data-tab="window">Uygulamalar</button></div>
+</header>
+<main><div class="grid" id="grid"><div class="empty">Yükleniyor…</div></div></main>
+<footer>
+  <label class="sw" id="audioRow"><input type="checkbox" id="audio"><i></i><span>🔊 Bilgisayar sesini de paylaş<small id="audioSub">Oyun ve müzik sesi yayına eklenir; sohbet sesleri otomatik temizlenir.</small></span></label>
+  <button class="btn sec" id="cancel">Vazgeç</button>
+  <button class="btn" id="go" disabled>Paylaş</button>
+</footer>
+<script>
+  const q = new URLSearchParams(location.search)
+  const audio = document.getElementById('audio')
+  if (q.get('canAudio') === '1') audio.checked = q.get('audio') === '1'
+  else {
+    audio.disabled = true
+    document.getElementById('audioRow').style.opacity = '.5'
+    document.getElementById('audioSub').textContent = 'Bu işletim sisteminde bilgisayar sesi paylaşılamıyor.'
+  }
+  const grid = document.getElementById('grid')
+  const go = document.getElementById('go')
+  let sources = [], tab = 'screen', selected = null
+
+  function card(s) {
+    const b = document.createElement('button')
+    b.className = 'card' + (s.id === selected ? ' on' : '')
+    b.dataset.id = s.id
+    const th = document.createElement('div')
+    th.className = 'thumb'
+    if (s.thumb) { const img = document.createElement('img'); img.src = s.thumb; img.alt = ''; th.appendChild(img) }
+    const nm = document.createElement('div')
+    nm.className = 'name'
+    if (s.icon) { const ic = document.createElement('img'); ic.src = s.icon; ic.alt = ''; nm.appendChild(ic) }
+    const t = document.createElement('span')
+    t.textContent = s.type === 'screen' && sources.filter(x => x.type === 'screen').length === 1 ? 'Tüm ekran' : s.name
+    nm.appendChild(t)
+    b.append(th, nm)
+    b.addEventListener('click', () => select(s.id))
+    b.addEventListener('dblclick', () => { select(s.id); share() })
+    return b
+  }
+  function render() {
+    const list = sources.filter(s => s.type === tab)
+    grid.replaceChildren(...(list.length ? list.map(card) : [Object.assign(document.createElement('div'), {className: 'empty', textContent: tab === 'screen' ? 'Ekran bulunamadı.' : 'Paylaşılabilecek açık pencere yok.'})]))
+    go.disabled = !selected
+  }
+  function select(id) {
+    selected = id
+    for (const c of grid.querySelectorAll('.card')) c.classList.toggle('on', c.dataset.id === id)
+    go.disabled = false
+  }
+  function share() { if (selected) window.picker.choose(selected, audio.checked && !audio.disabled) }
+  document.querySelector('.tabs').addEventListener('click', e => {
+    const b = e.target.closest('[data-tab]')
+    if (!b) return
+    tab = b.dataset.tab
+    for (const x of document.querySelectorAll('.tabs button')) x.classList.toggle('on', x === b)
+    render()
+  })
+  go.addEventListener('click', share)
+  document.getElementById('cancel').addEventListener('click', () => window.picker.cancel())
+  addEventListener('keydown', e => {
+    if (e.key === 'Escape') window.picker.cancel()
+    if (e.key === 'Enter' && selected) share()
+  })
+  window.picker.sources().then(list => {
+    sources = list || []
+    // Varsayılan: tek ekran varsa onu seç
+    const screens = sources.filter(s => s.type === 'screen')
+    if (screens.length) selected = screens[0].id
+    render()
+  }).catch(() => { grid.innerHTML = '<div class="empty">Kaynaklar alınamadı.</div>' })
+</script>
+</body>
+</html>

@@ -1,0 +1,89 @@
+{
+  "name": "kanka-chat-desktop",
+  "productName": "Kanka Chat",
+  "version": "1.0.0",
+  "description": "Kanka Chat masaüstü uygulaması: oyun içinde bas-konuş, sistem sesli ekran paylaşımı, tepsi",
+  "main": "main.js",
+  "author": "aliaskin",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist:win": "electron-builder --win --x64 --publish never",
+    "dist:linux": "electron-builder --linux --x64 --publish never"
+  },
+  "dependencies": {
+    "uiohook-napi": "1.5.5"
+  },
+  "devDependencies": {
+    "electron": "44.6.0",
+    "electron-builder": "26.15.3"
+  },
+  "build": {
+    "appId": "io.github.aliaskin.kankachat",
+    "productName": "Kanka Chat",
+    "copyright": "Kanka Chat",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "picker-preload.js",
+      "picker.html",
+      "offline.html",
+      "build/icon.png",
+      "build/badge.png",
+      "package.json"
+    ],
+    "asarUnpack": [
+      "node_modules/uiohook-napi/**"
+    ],
+    "npmRebuild": false,
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": false,
+      "runAfterFinish": true,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "Kanka Chat",
+      "artifactName": "KankaChat-Setup.${ext}"
+    },
+    "portable": {
+      "artifactName": "KankaChat-Portable.${ext}"
+    },
+    "linux": {
+      "icon": "build/icon.png",
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "category": "Network",
+      "artifactName": "KankaChat.${ext}"
+    },
+    "publish": null
+  },
+  "repository": "github:aliaskin/konu-mauygulamas-"
+}
