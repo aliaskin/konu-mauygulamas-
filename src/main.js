@@ -1352,11 +1352,14 @@ async function buildMic(raw, o = {}) {
     return {stream: chain.stream, raw, chain}
   } catch (e) {
     console.warn('Gürültü engelleme modeli kullanılamadı, tarayıcı filtresine geçiliyor:', e)
+    // Aynı mikrofon farklı filtre ayarıyla ancak eskisi kapatılınca açılabilir
+    raw.getTracks().forEach(t => t.stop())
     try {
       const r2 = await getMic({...o, forceNs: true})
-      raw.getTracks().forEach(t => t.stop())
       return {stream: r2, raw: r2, chain: null}
-    } catch { return {stream: raw, raw, chain: null} }
+    } catch {
+      try { const r3 = await getMic(o); return {stream: r3, raw: r3, chain: null} } catch { return {stream: null, raw: null, chain: null} }
+    }
   }
 }
 function voicePeers() {
@@ -1372,6 +1375,8 @@ async function joinVoice(sid, cid) {
   try {
     if (S.voice) leaveVoice(true)
     actx()
+    // Ses bağlamları tıklamanın hemen ardından oluşturulur (izin penceresi uzun sürse de askıda başlamasın)
+    if (S.settings.nsm === 'ai') vctx()
     let mic = null, micRaw = null, chain = null
     if (navigator.mediaDevices?.getUserMedia) {
       try { micRaw = await getMic() } catch (e) { toast('Mikrofona erişilemedi (' + (e.name || e.message) + ') — yalnızca dinleyebilirsin.') }
@@ -2981,6 +2986,8 @@ async function settingsModal(tab = 'profile') {
 // Mikrofon testi: filtrelenmiş sesini (formdaki seçimlerle) kendi hoparlörüne/kulaklığına çalar
 async function micTest(f, btn) {
   const o = {mic: f.mic.value, nsm: f.nsm.value, nbg: f.nbg.checked, ec: f.ec.checked, agc: f.agc.checked}
+  actx()
+  if (o.nsm === 'ai') vctx()
   btn.disabled = true
   let raw
   try { raw = await getMic(o) } catch (e) { btn.disabled = false; toast('Mikrofona erişilemedi: ' + (e.name || e.message)); return }
@@ -3010,16 +3017,19 @@ function stopMicTest() {
 async function restartMic() {
   const v = S.voice
   if (!v) return
+  // Tarayıcı aynı mikrofonu farklı işleme ayarlarıyla (gürültü/yankı filtresi) iki kez açamıyor:
+  // yenisini istemeden önce eskisi kapatılır (kısa bir an sessizlik olur)
+  v.chain?.stop()
+  v.chain = null
+  v.micRaw?.getTracks().forEach(t => t.stop())
   let raw
   try { raw = await getMic() } catch (e) { toast('Mikrofon değiştirilemedi: ' + (e.name || e.message)); return }
   if (S.voice !== v) { raw.getTracks().forEach(t => t.stop()); return }
   const built = await buildMic(raw)
-  if (S.voice !== v) { built.chain?.stop(); built.raw.getTracks().forEach(t => t.stop()); return }
+  if (S.voice !== v || !built.stream) { built.chain?.stop(); built.raw?.getTracks().forEach(t => t.stop()); return }
   const mic = built.stream
-  const oldRaw = v.micRaw, oldChain = v.chain
   v.micRaw = built.raw
   v.chain = built.chain
-  const stopOld = () => { oldChain?.stop(); if (oldRaw && oldRaw !== v.mic) oldRaw.getTracks().forEach(t => t.stop()) }
   const old = v.mic
   const c = S.conns[v.sid]
   if (old && c) {
@@ -3034,10 +3044,8 @@ async function restartMic() {
     old.addTrack?.(nt)
     if (ot !== nt) ot.stop()
     mic.getTracks().forEach(t => { if (t !== nt) t.stop() })
-    stopOld()
   } else {
     v.mic = mic
-    stopOld()
     syncAllMedia()
   }
   applyMic()
