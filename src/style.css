@@ -70,6 +70,8 @@ a:hover { text-decoration: underline; }
 .vu:hover { background: var(--hover); color: var(--text); }
 .vu .nm { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .vu .ico { font-size: 12px; opacity: .8; }
+.vu.lost { opacity: .5; }
+.tile .lbl small { opacity: .75; font-weight: 400; }
 .live { background: var(--red); color: #fff; font-size: 10px; font-weight: 700; padding: 1px 4px; border-radius: 4px; }
 
 #vbar { background: var(--deep); border-bottom: 1px solid var(--line); padding: 8px; display: none; }

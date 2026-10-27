@@ -17,7 +17,8 @@ const APP_ORIGIN = new URL(APP_URL).origin
 const ICON = path.join(__dirname, 'build', 'icon.png')
 const BADGE = path.join(__dirname, 'build', 'badge.png')
 const isWin = process.platform === 'win32'
-const HOTKEYS = {mute: 'CommandOrControl+Shift+M', deafen: 'CommandOrControl+Shift+D'}
+// Yalnızca mikrofon kısayolu var. Sağırlaştırma kısayolu yanlışlıkla basıldığı için bilerek kaldırıldı.
+const HOTKEYS = {mute: 'CommandOrControl+Shift+M'}
 
 // Dizüstülerde harici ekran kartını kullan (donanım kodlayıcı); küçültülünce zamanlayıcılar yavaşlamasın
 app.commandLine.appendSwitch('force_high_performance_gpu')
@@ -371,7 +372,7 @@ function updateTray() {
     {label: 'Kanka Chat\'i aç', click: showWindow},
     {type: 'separator'},
     {label: state.muted ? 'Mikrofonu aç' : 'Mikrofonu kapat', enabled: state.inVoice, click: () => send('hotkey', 'mute')},
-    {label: state.deafened ? 'Sesi aç (sağırlaştırmayı kaldır)' : 'Sağırlaştır', click: () => send('hotkey', 'deafen')},
+    {label: state.deafened ? 'Sesi aç (sağırlaştırmayı kaldır)' : 'Sağırlaştır', click: () => send('hotkey', 'tray-deafen')},
     {type: 'separator'},
     ...(canAutoStart ? [{label: 'Bilgisayar açılınca başlat', type: 'checkbox', checked: autoStart(), click: i => setAutoStart(i.checked)}] : []),
     {label: 'Kapatınca tepsiye küçült', type: 'checkbox', checked: prefs.closeToTray, click: i => { prefs.closeToTray = i.checked; savePrefs() }},

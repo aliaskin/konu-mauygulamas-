@@ -4,6 +4,7 @@
 import {joinRoom, selfId} from 'trystero'
 import {CODECS, HW, isHwCodec, makeTunedPC, pickCodec, probeCodecs, screenBitrate, videoStats} from './media.js'
 import {createEchoGuard} from './echo.js'
+import {createVoiceChain, loadDenoiser} from './voice.js'
 import {isYtId, loadYouTubeApi, parseSpotify, parseYouTube, spotifyTitle, ytSearch, ytTitle} from './music.js'
 
 // ======================= yardımcılar =======================
@@ -62,7 +63,7 @@ const avatar = (n, c, cls = '', dot = '', attrs = '') =>
 const S = {
   me: LS.get('kd_me', null),
   settings: Object.assign({
-    ns: true, ec: true, agc: true, ptt: false, pttKey: 'KeyV', sens: 8, vq: 'med',
+    ns: true, nsm: 'ai', nbg: true, ec: true, agc: true, ptt: false, pttKey: 'KeyV', sens: 8, vq: 'med',
     sres: 0, sfps: 0, smode: 'motion', saudio: true, sv: 2, echoGuard: true, mvol: 60, mmute: false, scursor: true,
     mic: '', cam: '', sounds: true, notif: false, members: true
   }, LS.get('kd_set', {})),
@@ -93,6 +94,9 @@ const S = {
 }
 // Eski sürümden gelen ayarlar: ekran paylaşımı varsayılanı artık kaynak (en net) çözünürlük
 if ((S.settings.sv || 0) < 2) { S.settings.sres = 0; S.settings.sv = 2 }
+// Gürültü engelleme artık 3 kademeli: eskiden kapatan kapalı kalır, diğer herkes yapay zekâ filtresine geçer
+if ((S.settings.sv || 0) < 3) { S.settings.nsm = S.settings.ns === false ? 'off' : 'ai'; S.settings.sv = 3 }
+if (!['ai', 'std', 'off'].includes(S.settings.nsm)) S.settings.nsm = 'ai'
 const saveServers = () => LS.set('kd_servers', S.servers)
 const saveSettings = () => LS.set('kd_set', S.settings)
 const srvById = id => S.servers.find(s => s.id === id)
@@ -272,6 +276,13 @@ function remoteDecFor(pc) {
   return undefined
 }
 const TunedPC = makeTunedPC(remoteDecFor)
+// Doğrudan bağlantının kurulamadığı ağlar (bazı CGNAT / mobil / kurumsal ağlar) için yedek aktarım sunucusu.
+// Yalnızca doğrudan yol bulunamazsa devreye girer; ses ve görüntü uçtan uca şifreli kalır.
+// Bu da yetmezse ses ve mesajlar, iki tarafa da bağlı olan bir arkadaş üzerinden aktarılır (aşağıda "bağlantı sağlığı").
+const TURN = new URLSearchParams(location.search).has('noturn') ? [] : [{
+  urls: ['turn:openrelay.metered.ca:80', 'turn:openrelay.metered.ca:443', 'turn:openrelay.metered.ca:443?transport=tcp'],
+  username: 'openrelayproject', credential: 'openrelayproject'
+}]
 
 function connect(srv) {
   if (S.conns[srv.id]) return S.conns[srv.id]
@@ -281,13 +292,14 @@ function connect(srv) {
       appId: APP_ID,
       password: srv.key,
       relayConfig: RELAYS.length ? {urls: RELAYS, warnOnRelayFailure: false} : {warnOnRelayFailure: false},
+      turnConfig: TURN,
       ...(TunedPC ? {rtcPolyfill: TunedPC} : {})
     }, 'srv_' + srv.id)
   } catch (e) {
     toast('Bağlantı kurulamadı: ' + e.message)
     return null
   }
-  const c = {sid: srv.id, room, peers: {}, a: {}}
+  const c = {sid: srv.id, room, peers: {}, a: {}, ghosts: {}, lost: {}, rlyAsk: {}, rlyOut: {}, rsent: {}, heal: {}, rewatch: {}}
   S.conns[srv.id] = c
   const on = (name, fn) => {
     const a = room.makeAction(name)
@@ -302,6 +314,13 @@ function connect(srv) {
   on('typ', onTyping)
   on('watch', onWatch)
   on('mus', onMus)
+  on('mclk', onMclk)
+  on('bye', onBye)
+  on('ros', onRos)
+  on('rly', onRly)
+  on('gst', onGst)
+  on('fmsg', onFmsg)
+  on('rs', onRs)
   const fa = room.makeAction('file')
   fa.onReceive = ({byteLength}) => byteLength <= MAX_FILE
   let progT = 0
@@ -314,6 +333,9 @@ function connect(srv) {
   fa.onMessage = (data, ctx) => onFile(c, data, ctx.peerId, ctx.metadata)
   c.a.file = fa
   room.onPeerJoin = pid => {
+    // Aynı kişiyle bağlantı sessizce yenilendiyse (kütüphane bu durumda "ayrıldı" demiyor)
+    // eski bağlantıya ait ses/görüntü kaydı geçersizdir: akışlar yeni bağlantıda baştan kurulur
+    if (c.peers[pid]) relinkPeer(c, pid)
     c.a.hello.send(helloData(c.sid), {target: pid})
     c.a.sync.send(syncData(c.sid), {target: pid})
     for (const key of Object.keys(S.music)) if (key.startsWith(c.sid + '|') && S.music[key].cur) musSend(key, pid)
@@ -325,6 +347,7 @@ function connect(srv) {
 function disconnect(sid) {
   const c = S.conns[sid]
   if (!c) return
+  sendBye(c)
   delete S.conns[sid]
   try { c.room.leave() } catch {}
 }
@@ -346,17 +369,38 @@ function onHello(c, d, pid) {
     const dm = msgs('dm|' + p.uid)
     if (dm.length) c.a.sync.send({dm: dm.slice(-50)}, {target: pid})
   }
+  // Karşı taraf bizi tanımıyorsa (ilk selam kaybolduysa) kendi selamımızı da gönder
+  if (d.ask) c.a.hello.send(helloData(c.sid), {target: pid}).catch(() => {})
+  // Artık doğrudan bağlıyız: aracı üzerinden görünen / "yeniden bağlanıyor" kayıtlarını kaldır
+  if (c.ghosts[pid]) dropGhost(c, pid)
+  for (const [x, l] of Object.entries(c.lost)) if (l.uid === p.uid) delete c.lost[x]
   voiceStateChanged(c, pid, prev, p.st)
+  // Bağlantı koptuğunda izlediğimiz yayın varsa otomatik devam et
+  const rw = c.rewatch[p.uid]
+  if (rw) {
+    delete c.rewatch[p.uid]
+    const v = S.voice
+    if (now() - rw < 60000 && p.st.scr && v && v.sid === c.sid && p.st.v === v.cid && !v.watching.has(pid)) setWatching(pid, true)
+  }
+  updateWatchLevels()
+  netChanged(c)
   inv('side', 'members', 'head', 'stage', 'rail')
 }
 function onState(c, d, pid) {
   const p = c.peers[pid]
-  if (!p) return
+  if (!p) {
+    // Selamı kaçırdığımız biri: tanışmak için selam iste (en fazla 5 sn'de bir)
+    const h = c.heal[pid] ||= {miss: 0, t: 0, ask: 0}
+    if (now() - h.ask > 5000) { h.ask = now(); c.a.hello.send({...helloData(c.sid), ask: 1}, {target: pid}).catch(() => {}) }
+    return
+  }
   const prev = p.st
   p.st = sanitizeSt(d)
+  forwardState(c, pid)
   const onlySpk = prev.v === p.st.v && prev.m === p.st.m && prev.d === p.st.d && prev.cam === p.st.cam && prev.scr === p.st.scr
   if (onlySpk) { updateSpeaking(); return }
   voiceStateChanged(c, pid, prev, p.st)
+  netChanged(c)
   inv('side', 'members', 'stage')
 }
 function voiceStateChanged(c, pid, prev, st) {
@@ -364,7 +408,6 @@ function voiceStateChanged(c, pid, prev, st) {
   if (!v || v.sid !== c.sid) return
   const was = prev?.v === v.cid, is = st.v === v.cid
   if (was !== is) {
-    beep(is ? 'join' : 'leave')
     if (!is) dropRemote(pid)
     // Yeni gelene çalan müziği bildir
     const mk = v.sid + '|' + v.cid
@@ -378,13 +421,16 @@ function voiceStateChanged(c, pid, prev, st) {
   if (!st.scr) dropScreenAudio(pid)
   if (!st.scr) { v.watching.delete(pid); delete v.lvSent[pid] }
   syncMedia(pid)
+  presenceSoon()
 }
 function onLeave(c, pid) {
   const p = c.peers[pid]
   delete c.peers[pid]
   const v = S.voice
+  // Haber vermeden kopan (ağ sorunu) ses kanalındaki kişi bir süre "yeniden bağlanıyor" diye görünür
+  if (p && !p.bye && p.st?.v) c.lost[pid] = {uid: p.uid, n: p.n, c: p.c, st: {...p.st, spk: false}, until: now() + LOST_TTL}
   if (v && v.sid === c.sid) {
-    if (p?.st?.v === v.cid) beep('leave')
+    if (p && v.watching.has(pid) && !p.bye) c.rewatch[p.uid] = now()
     dropRemote(pid)
     delete v.sent[pid]
     delete v.levels[pid]
@@ -392,8 +438,282 @@ function onLeave(c, pid) {
     v.watching.delete(pid)
     if (v.watchers.delete(pid)) retuneScreen()
   }
+  // Bu kişi aracılık ediyorduysa ve aracılık ettiğimiz biriyse kayıtları temizle
+  delete c.rlyOut[pid]
+  delete c.rsent[pid]
+  delete c.rlyAsk[pid]
+  delete c.heal[pid]
+  for (const [x, g] of Object.entries(c.ghosts)) if (g.via.delete(pid) && !g.via.size) dropGhost(c, x)
+  netChanged(c)
   inv('side', 'members', 'head', 'stage')
 }
+// ======================= bağlantı sağlığı =======================
+// Bu ağda her kişi çifti ayrı bir doğrudan bağlantıdır. Bir çiftin bağlantısı kurulamaz, kopar ya da
+// sessizce yenilenirse eskiden o kişi sesli kanalda görünmüyor / duyulmuyordu (arkadaşlar görürken).
+// Bu bölüm:
+// 1) yenilenen bağlantıda ses/görüntü akışlarını baştan kurar (relinkPeer),
+// 2) gönderdiğimiz ve aldığımız ses akışını düzenli denetler, eksikse onarır (healMedia),
+// 3) herkes kimlerle bağlı olduğunu kısa bir listeyle paylaşır: doğrudan ulaşamadığımız biri ortak bir
+//    arkadaş üzerinden görünür, sesi, durumu ve mesajları o arkadaş üzerinden aktarılır (aracı),
+// 4) habersiz kopan kişiyi birkaç saniye "yeniden bağlanıyor" diye gösterir (hemen "çıktı" sanılmasın).
+const GHOST_TTL = 15000, LOST_TTL = 25000
+const dirOfUid = (c, uid) => Object.values(c.peers).some(p => p.uid === uid)
+function sendBye(c) { try { c.a.bye.send(1).catch(() => {}) } catch {} }
+function onBye(c, d, pid) { if (c.peers[pid]) c.peers[pid].bye = true }
+function relinkPeer(c, pid) {
+  const v = S.voice
+  if (!v || v.sid !== c.sid) return
+  delete v.sent[pid]
+  delete c.rsent[pid]
+  dropRemote(pid)
+  // izlediğimiz yayını yeni bağlantıda yeniden iste
+  if (v.watching.has(pid)) delete v.lvSent[pid]
+}
+// Kısa gecikmeyle (art arda gelen olayları birleştirerek) ağ görünümünü güncelle
+function netChanged(c) {
+  if (c.netT) return
+  c.netT = setTimeout(() => {
+    c.netT = 0
+    if (S.conns[c.sid] !== c) return
+    sendRoster(c)
+    planRelays(c)
+    syncRelayOutAll(c)
+    presenceSoon()
+    inv('side', 'members', 'stage')
+  }, 300)
+}
+function sendRoster(c) {
+  // Tek kişiye bağlıysak ona anlatacak başka biri yok
+  if (Object.keys(c.peers).length < 2) return
+  const l = Object.entries(c.peers).map(([pid, p]) => [pid, p.uid, p.n, p.c, p.st])
+  try { c.a.ros.send({l}).catch(() => {}) } catch {}
+}
+function onRos(c, d, B) {
+  if (!c.peers[B] || !d || !Array.isArray(d.l)) return
+  const t = now(), seen = new Set()
+  const v = S.voice
+  for (const e of d.l.slice(0, 64)) {
+    if (!Array.isArray(e)) continue
+    const [x, uid, n, col, st] = e
+    if (typeof x !== 'string' || !x || x.length > 40 || x === selfId || typeof uid !== 'string' || !uid || uid === S.me.uid) continue
+    seen.add(x)
+    if (c.peers[x]) continue
+    // Kütüphane düzeyinde bağlıyız ama selamı kaçırdık: aracıya gerek yok, selam iste
+    if (c.room.getPeers()[x]) { askHello(c, x); continue }
+    const g = c.ghosts[x] ||= {via: new Map(), st: sanitizeSt(null)}
+    const prev = g.st
+    Object.assign(g, {uid: clamp(uid, 40), n: clamp(n, 32) || 'Biri', c: isColor(col) ? col : '#5865f2', st: sanitizeSt(st)})
+    g.via.set(B, t)
+    for (const [y, l] of Object.entries(c.lost)) if (l.uid === g.uid) delete c.lost[y]
+    if (v && v.sid === c.sid && prev.v === v.cid && g.st.v !== v.cid) dropRemote(x)
+  }
+  for (const [x, g] of Object.entries(c.ghosts)) if (!seen.has(x) && g.via.delete(B) && !g.via.size) dropGhost(c, x)
+  netChanged(c)
+}
+function askHello(c, pid) {
+  const h = c.heal[pid] ||= {miss: 0, t: 0, ask: 0}
+  if (now() - h.ask < 5000) return
+  h.ask = now()
+  try { c.a.hello.send({...helloData(c.sid), ask: 1}, {target: pid}).catch(() => {}) } catch {}
+}
+function dropGhost(c, x) {
+  delete c.ghosts[x]
+  const v = S.voice
+  if (v && v.sid === c.sid && v.remote[x]?.via) dropRemote(x)
+  presenceSoon()
+}
+// İstek tarafı: doğrudan ulaşamadığım her kişi için bir aracı seç, sesini (aynı kanaldaysak) ve mesajlarını iste
+function planRelays(c) {
+  const v = S.voice
+  const want = {}
+  for (const [x, g] of Object.entries(c.ghosts)) {
+    if (dirOfUid(c, g.uid)) continue
+    const vias = [...g.via.keys()].filter(b => c.peers[b]).sort()
+    if (!vias.length) continue
+    const voiceHere = !!(v && v.sid === c.sid && g.st.v === v.cid)
+    // Ses yalnızca aynı ses kanalındaki bir aracıdan gelebilir (o kişinin sesini zaten alıyor)
+    const vb = voiceHere ? vias.find(b => c.peers[b].st.v === v.cid) : null
+    const b = vb || vias[0]
+    const r = want[b] ||= {w: [], m: []}
+    r.m.push(x)
+    if (vb) r.w.push(x)
+  }
+  for (const b of new Set([...Object.keys(want), ...Object.keys(c.rlyAsk)])) {
+    if (!c.peers[b]) { delete c.rlyAsk[b]; continue }
+    const r = want[b] || {w: [], m: []}
+    const sig = r.w.sort().join() + '|' + r.m.sort().join()
+    const prev = c.rlyAsk[b]
+    if (prev && prev.sig === sig && now() - prev.t < 10000) continue
+    try { c.a.rly.send(r, {target: b}).catch(() => {}) } catch {}
+    if (want[b]) c.rlyAsk[b] = {sig, t: now()}; else delete c.rlyAsk[b]
+  }
+}
+// Aracı tarafı: bana bağlı R, ulaşamadığı kişilerin sesini/mesajını istiyor
+function onRly(c, d, R) {
+  if (!c.peers[R] || !d) return
+  const ok = x => typeof x === 'string' && x !== R && !!c.peers[x]
+  const w = new Set((Array.isArray(d.w) ? d.w : []).slice(0, 32).filter(ok))
+  const m = new Set((Array.isArray(d.m) ? d.m : []).slice(0, 64).filter(ok))
+  const prevM = c.rlyOut[R]?.m
+  if (w.size || m.size) c.rlyOut[R] = {w, m}; else delete c.rlyOut[R]
+  // Yeni aracılık: aradaki kopuklukta kaçırılmış olabilecek son mesajları da gönder
+  if ([...m].some(x => !prevM?.has(x))) try { c.a.sync.send(syncData(c.sid), {target: R}).catch(() => {}) } catch {}
+  syncRelayOut(c, R)
+  // İstenen kişilerin güncel durumunu hemen ilet
+  for (const x of m) forwardState(c, x, R)
+}
+function syncRelayOut(c, R) {
+  const v = S.voice
+  const want = c.rlyOut[R]
+  const sent = c.rsent[R] || {}
+  const target = {}
+  if (want && v && v.sid === c.sid && c.peers[R]?.st.v === v.cid) {
+    for (const x of want.w) {
+      const s = c.peers[x]?.st.v === v.cid ? v.remote[x]?.mic : null
+      if (s && !v.remote[x].via && s.getAudioTracks().some(t => t.readyState === 'live')) target[x] = s
+    }
+  }
+  for (const [x, s] of Object.entries(sent)) {
+    if (target[x] === s) continue
+    try { c.room.removeStream(s, {target: R}) } catch {}
+    delete sent[x]
+  }
+  for (const [x, s] of Object.entries(target)) {
+    if (sent[x]) continue
+    sent[x] = s
+    try { Promise.all(c.room.addStream(s, {target: R, metadata: {k: 'rmic', o: x}})).catch(() => {}) } catch {}
+  }
+  if (Object.keys(sent).length) c.rsent[R] = sent; else delete c.rsent[R]
+}
+function syncRelayOutAll(c) {
+  for (const R of new Set([...Object.keys(c.rlyOut), ...Object.keys(c.rsent)])) syncRelayOut(c, R)
+}
+// Aracı: X'in durumunu (konuşuyor, susturdu, kanal değiştirdi) X'e ulaşamayanlara anında ilet
+function forwardState(c, x, only) {
+  const p = c.peers[x]
+  if (!p) return
+  for (const [R, o] of Object.entries(c.rlyOut)) {
+    if ((only && R !== only) || !o.m.has(x)) continue
+    try { c.a.gst.send({o: x, st: p.st}, {target: R}).catch(() => {}) } catch {}
+  }
+}
+function onGst(c, d, B) {
+  const g = d && typeof d.o === 'string' && c.ghosts[d.o]
+  if (!g || !g.via.has(B)) return
+  const prev = g.st
+  g.st = sanitizeSt(d.st)
+  g.via.set(B, now())
+  if (prev.v === g.st.v && prev.m === g.st.m && prev.d === g.st.d && prev.scr === g.st.scr && prev.cam === g.st.cam) { updateSpeaking(); return }
+  const v = S.voice
+  if (v && v.sid === c.sid && prev.v === v.cid && g.st.v !== v.cid) dropRemote(d.o)
+  netChanged(c)
+}
+// Aracı: X'in kanal mesajlarını X'e ulaşamayanlara ilet
+function forwardMsg(c, x, d) {
+  for (const [R, o] of Object.entries(c.rlyOut)) {
+    if (!o.m.has(x)) continue
+    try { c.a.fmsg.send({o: x, d}, {target: R}).catch(() => {}) } catch {}
+  }
+}
+function onFmsg(c, d, B) {
+  const g = d && typeof d.o === 'string' && c.ghosts[d.o]
+  if (!g || !g.via.has(B) || !d.d || typeof d.d !== 'object' || d.d.dm) return
+  const m = sanitizeMsg(d.d.m)
+  if (!m || typeof d.d.cid !== 'string' || !/^[a-z0-9]{1,20}$/.test(d.d.cid)) return
+  receive(keyOf(c.sid, d.d.cid), m, g.uid, true)
+}
+// Aracı üzerinden gelen ses (doğrudan bağlanamadığımız kişinin sesi)
+function onRelayStream(c, B, stream, o) {
+  const v = S.voice
+  const g = typeof o === 'string' && c.ghosts[o]
+  if (!g || c.peers[o] || dirOfUid(c, g.uid) || g.st.v !== v.cid) return
+  const r = v.remote[o] ||= {}
+  r.mic = stream
+  r.via = B
+  const drop = () => {
+    if (r.mic !== stream) return
+    delete r.mic
+    delete r.via
+    const a = S.audios[o]
+    if (a && a.srcObject === stream) { a.srcObject = null; a.remove(); delete S.audios[o] }
+    echoSyncRefs()
+  }
+  stream.addEventListener('removetrack', () => { if (!stream.getTracks().length) drop() })
+  stream.getTracks().forEach(t => t.addEventListener('ended', drop))
+  playMic(o, stream)
+}
+// Ses akışlarını denetle: gönderdiğimizi sandığımız akış bağlantıda gerçekten var mı,
+// konuşabilen birinin sesi bize ulaşıyor mu? Eksikse onar / karşı taraftan yeniden göndermesini iste.
+function healMedia(c) {
+  const v = S.voice
+  if (!v || v.sid !== c.sid) return
+  const pcs = c.room.getPeers()
+  for (const pid of voicePeers()) {
+    const pc = pcs[pid]
+    if (!pc || pc.connectionState === 'closed') continue
+    const sent = v.sent[pid]
+    if (sent) {
+      let senders = []
+      try { senders = pc.getSenders().map(x => x.track).filter(Boolean) } catch {}
+      let bad = false
+      for (const [k, st] of Object.entries(sent)) if (!st.getTracks().some(t => senders.includes(t))) { delete sent[k]; bad = true }
+      if (bad) syncMedia(pid)
+    } else syncMedia(pid)
+    const p = c.peers[pid]
+    const h = c.heal[pid] ||= {miss: 0, t: 0, ask: 0}
+    const live = v.remote[pid]?.mic?.getAudioTracks().some(t => t.readyState === 'live')
+    if (!p.st.m && !live) {
+      if (++h.miss >= 2 && now() - h.t > 15000) {
+        h.t = now()
+        h.miss = 0
+        try { c.a.rs.send(1, {target: pid}).catch(() => {}) } catch {}
+      }
+    } else h.miss = 0
+  }
+}
+// Karşı taraf sesimizi alamadığını söylüyor: o kişiye giden akışları baştan kur
+function onRs(c, d, pid) {
+  const v = S.voice
+  if (!v || v.sid !== c.sid || c.peers[pid]?.st.v !== v.cid) return
+  for (const st of Object.values(v.sent[pid] || {})) try { c.room.removeStream(st, {target: pid}) } catch {}
+  delete v.sent[pid]
+  syncMedia(pid)
+}
+// Sesli kanaldaki kişiler değişti mi? (doğrudan, aracı üzerinden veya yeniden bağlanan) Giriş/çıkış sesi buradan çalar;
+// böylece kısa kopmalarda art arda "çıktı/girdi" sesi çalmaz.
+let presT = 0
+function presenceSoon() { if (!presT) presT = setTimeout(() => { presT = 0; chanPresence() }, 60) }
+function chanPresence() {
+  const v = S.voice
+  if (!v) { S.chanUids = null; return }
+  const cur = new Set(voiceUsers(v.sid, v.cid).map(u => u.uid))
+  const prev = S.chanUids
+  S.chanUids = cur
+  if (!prev) return
+  let joined = false, left = false
+  for (const u of cur) if (!prev.has(u)) joined = true
+  for (const u of prev) if (!cur.has(u)) left = true
+  if (joined) beep('join'); else if (left) beep('leave')
+}
+let netTicks = 0
+setInterval(() => {
+  netTicks++
+  const t = now()
+  for (const c of Object.values(S.conns)) {
+    let changed = false
+    for (const [x, g] of Object.entries(c.ghosts)) {
+      for (const [b, ts] of g.via) if (t - ts > GHOST_TTL || !c.peers[b]) g.via.delete(b)
+      if (!g.via.size) { dropGhost(c, x); changed = true }
+    }
+    for (const [x, l] of Object.entries(c.lost)) if (l.until < t) { delete c.lost[x]; changed = true }
+    // Kütüphane bağlı diyor ama selamlaşmadık: selam iste
+    for (const pid of Object.keys(c.room.getPeers())) if (!c.peers[pid]) askHello(c, pid)
+    if (netTicks % 2 === 0) { sendRoster(c); healMedia(c) }
+    planRelays(c)
+    syncRelayOutAll(c)
+    if (changed) { presenceSoon(); inv('side', 'members', 'stage') }
+  }
+}, 3000)
 let srvSaveT = 0
 function saveServersSoon() { clearTimeout(srvSaveT); srvSaveT = setTimeout(saveServers, 2000) }
 
@@ -465,6 +785,7 @@ function onMsg(c, d, pid) {
   } else {
     if (typeof d.cid !== 'string' || !/^[a-z0-9]{1,20}$/.test(d.cid)) return
     receive(keyOf(c.sid, d.cid), m, p.uid, true)
+    forwardMsg(c, pid, d)
   }
 }
 function receive(key, m, senderUid, live) {
@@ -773,12 +1094,18 @@ function renderRail() {
   $('#rail').innerHTML = h
 }
 function voiceUsers(sid, cid) {
-  const out = []
+  const out = [], uids = new Set()
   if (S.voice && S.voice.sid === sid && S.voice.cid === cid) {
     out.push({pk: 'me', uid: S.me.uid, n: S.me.name, c: S.me.color, st: stateFor(sid)})
+    uids.add(S.me.uid)
   }
   const c = S.conns[sid]
-  if (c) for (const [pid, p] of Object.entries(c.peers)) if (p.st.v === cid) out.push({pk: sid + ':' + pid, uid: p.uid, n: p.n, c: p.c, st: p.st})
+  if (!c) return out
+  for (const [pid, p] of Object.entries(c.peers)) if (p.st.v === cid && !uids.has(p.uid)) { uids.add(p.uid); out.push({pk: sid + ':' + pid, pid, uid: p.uid, n: p.n, c: p.c, st: p.st}) }
+  // Doğrudan bağlanamadığımız ama arkadaşlarımızın gördüğü kişiler (ses ortak arkadaş üzerinden gelir)
+  for (const [x, g] of Object.entries(c.ghosts)) if (g.st.v === cid && !uids.has(g.uid)) { uids.add(g.uid); out.push({pk: sid + ':' + x, pid: x, uid: g.uid, n: g.n, c: g.c, st: g.st, ind: true}) }
+  // Habersiz kopan, yeniden bağlanması beklenen kişiler
+  for (const [x, l] of Object.entries(c.lost)) if (l.st.v === cid && !uids.has(l.uid)) { uids.add(l.uid); out.push({pk: sid + ':' + x, pid: x, uid: l.uid, n: l.n, c: l.c, st: l.st, lost: true}) }
   return out
 }
 function renderSide() {
@@ -818,7 +1145,9 @@ function renderSide() {
     if (us.length || ms?.cur) {
       h += '<div class="vusers">'
       for (const u of us) {
-        h += `<div class="vu" data-act="prof" data-uid="${esc(u.uid)}">${avatar(u.n, u.c, 's24' + (u.st.spk && !u.st.m ? ' spk' : ''), '', `data-pk="${u.pk}"`)}<span class="nm">${esc(u.n)}</span>${u.st.scr ? '<span class="live">CANLI</span>' : ''}${u.st.cam ? '<span class="ico">📷</span>' : ''}${u.st.d ? '<span class="ico">🔇</span>' : u.st.m ? '<span class="ico">🎙️̸</span>' : ''}</div>`
+        const note = u.lost ? '<span class="ico" title="Bağlantı koptu, yeniden bağlanıyor…">⏳</span>'
+          : u.ind ? '<span class="ico" title="Doğrudan bağlantı kurulamadı; sesi bir arkadaşın üzerinden geliyor">🔗</span>' : ''
+        h += `<div class="vu${u.lost ? ' lost' : ''}" data-act="prof" data-uid="${esc(u.uid)}">${avatar(u.n, u.c, 's24' + (u.st.spk && !u.st.m && !u.lost ? ' spk' : ''), '', `data-pk="${u.pk}"`)}<span class="nm">${esc(u.n)}</span>${u.st.scr && !u.ind && !u.lost ? '<span class="live">CANLI</span>' : ''}${u.st.cam && !u.ind && !u.lost ? '<span class="ico">📷</span>' : ''}${u.st.d ? '<span class="ico">🔇</span>' : u.st.m ? '<span class="ico">🎙️̸</span>' : ''}${note}</div>`
       }
       if (ms?.cur) h += `<div class="vu" title="${esc(ms.cur.t)}"${S.voice && S.voice.sid === sid && S.voice.cid === c.id ? ' data-act="bot-vol"' : ''}><div class="av s24 botav">🎵</div><span class="nm">Kanka Müzik · ${esc(ms.cur.t)}</span>${ms.playing ? '' : '<span class="ico">⏸️</span>'}</div>`
       h += '</div>'
@@ -875,6 +1204,7 @@ function renderMembers() {
   const c = S.conns[sid]
   const online = new Map([[S.me.uid, {uid: S.me.uid, n: S.me.name, c: S.me.color, st: stateFor(sid)}]])
   if (c) for (const p of Object.values(c.peers)) if (!online.has(p.uid)) online.set(p.uid, p)
+  if (c) for (const g of Object.values(c.ghosts)) if (!online.has(g.uid)) online.set(g.uid, g)
   const off = Object.entries(srv.mem || {}).filter(([u]) => !online.has(u)).sort((a, b) => b[1].seen - a[1].seen).slice(0, 100)
   const row = (uid, n, col, sub, on) => `<div class="mem${on ? '' : ' off'}" data-act="prof" data-uid="${esc(uid)}">${avatar(n, col, '', `<span class="dot${on ? '' : ' off'}"></span>`)}<div style="min-width:0"><div class="nm" style="color:${on ? col : ''}">${esc(n)}</div>${sub ? `<div class="sub">${sub}</div>` : ''}</div></div>`
   let h = `<div class="cat"><span>Çevrimiçi — ${online.size}</span></div>`
@@ -975,6 +1305,20 @@ function actx() {
   if (AC.state === 'suspended') AC.resume().catch(() => {})
   return AC
 }
+// Mikrofon işleme (gürültü engelleme) kendi ses iş parçacığında çalışır: çalma ve yankı korumasıyla
+// aynı iş parçacığını paylaşmaz, birinin yükü diğerinde takılma/kayma yapmaz. Model 48 kHz ister.
+let VAC = null
+function vctx() {
+  if (!VAC || VAC.state === 'closed') {
+    try { VAC = new (window.AudioContext || window.webkitAudioContext)({sampleRate: 48000, latencyHint: 'interactive'}) } catch { return null }
+    // Mikrofon bu bağlamdan geçer: askıya alınırsa hemen sürdür (yoksa sesin gitmez)
+    VAC.onstatechange = () => { if (VAC.state === 'suspended' && (S.voice || S.mtest)) VAC.resume().catch(() => {}) }
+  }
+  if (VAC.state === 'suspended') VAC.resume().catch(() => {})
+  return VAC
+}
+// Ses kanalında değilken mikrofon iş parçacığını uyut (boşta işlemci harcamasın)
+function vctxIdle() { if (VAC && !S.voice && !S.mtest && VAC.state === 'running') VAC.suspend().catch(() => {}) }
 function beep(kind) {
   if (!S.settings.sounds) return
   const ac = actx()
@@ -991,11 +1335,29 @@ function beep(kind) {
   o.start(t)
   o.stop(t + 0.26)
 }
-function getMic() {
-  const s = S.settings
+// o: denemek için geçici ayarlar (mikrofon testi). Yapay zekâ modunda tarayıcının kendi filtresi kapalıdır
+// (iki filtre üst üste sesi bozar); yapay zekâ hattı kurulamazsa tarayıcı filtresiyle yeniden alınır.
+function getMic(o = {}) {
+  const s = {...S.settings, ...o}
   return navigator.mediaDevices.getUserMedia({
-    audio: {deviceId: s.mic ? {ideal: s.mic} : undefined, echoCancellation: s.ec, noiseSuppression: s.ns, autoGainControl: s.agc, channelCount: 1}
+    audio: {deviceId: s.mic ? {ideal: s.mic} : undefined, echoCancellation: s.ec, noiseSuppression: s.nsm === 'std' || !!o.forceNs, autoGainControl: s.agc, channelCount: 1}
   })
+}
+// Mikrofon hattı: ham mikrofon → yapay zekâ gürültü engelleme + ses kapısı → gönderilen akış
+async function buildMic(raw, o = {}) {
+  const s = {...S.settings, ...o}
+  if (!raw || s.nsm !== 'ai') return {stream: raw, raw, chain: null}
+  try {
+    const chain = await createVoiceChain(vctx(), raw, {bg: s.nbg !== false, debug: !!S.dbgVoice, onDebug: d => S.dbgVoice?.push(d)})
+    return {stream: chain.stream, raw, chain}
+  } catch (e) {
+    console.warn('Gürültü engelleme modeli kullanılamadı, tarayıcı filtresine geçiliyor:', e)
+    try {
+      const r2 = await getMic({...o, forceNs: true})
+      raw.getTracks().forEach(t => t.stop())
+      return {stream: r2, raw: r2, chain: null}
+    } catch { return {stream: raw, raw, chain: null} }
+  }
 }
 function voicePeers() {
   const v = S.voice
@@ -1010,15 +1372,19 @@ async function joinVoice(sid, cid) {
   try {
     if (S.voice) leaveVoice(true)
     actx()
-    let mic = null
+    let mic = null, micRaw = null, chain = null
     if (navigator.mediaDevices?.getUserMedia) {
-      try { mic = await getMic() } catch (e) { toast('Mikrofona erişilemedi (' + (e.name || e.message) + ') — yalnızca dinleyebilirsin.') }
+      try { micRaw = await getMic() } catch (e) { toast('Mikrofona erişilemedi (' + (e.name || e.message) + ') — yalnızca dinleyebilirsin.') }
+      if (micRaw) ({stream: mic, raw: micRaw, chain} = await buildMic(micRaw))
     } else toast('Bu tarayıcı mikrofon erişimini desteklemiyor (HTTPS gerekli).')
-    S.voice = {sid, cid, mic, cam: null, scr: null, scrPreview: null, sent: {}, remote: {}, watching: new Set(), watchers: new Set(), levels: {}, lvSent: {}, spk: false}
+    S.voice = {sid, cid, mic, micRaw, chain, cam: null, scr: null, scrPreview: null, sent: {}, remote: {}, watching: new Set(), watchers: new Set(), levels: {}, lvSent: {}, spk: false}
     applyMic()
     startVad()
     S.conns[sid]?.a.st.send(stateFor(sid))
     for (const pid of voicePeers()) syncMedia(pid)
+    S.chanUids = null
+    chanPresence()
+    if (S.conns[sid]) netChanged(S.conns[sid])
     beep('join')
     S.focus = null
     openStage()
@@ -1033,13 +1399,17 @@ function leaveVoice(silent) {
     for (const s of Object.values(v.sent[pid])) try { c?.room.removeStream(s, {target: pid}) } catch {}
   }
   stopVad()
-  for (const s of [v.mic, v.cam, v.scr, v.scrRaw, v.scrPreview]) s?.getTracks().forEach(t => t.stop())
+  for (const s of [v.mic, v.micRaw, v.cam, v.scr, v.scrRaw, v.scrPreview]) s?.getTracks().forEach(t => t.stop())
+  v.chain?.stop()
+  setTimeout(vctxIdle, 0)
   stopEcho()
   for (const pid of Object.keys(v.remote)) dropRemote(pid)
   S.voice = null
+  S.chanUids = null
   clearStage(true)
   applyMusic()
   c?.a.st.send(stateFor(v.sid))
+  if (c) { syncRelayOutAll(c); netChanged(c) }
   if (!silent) beep('leave')
   S.showStage = false
   invAll()
@@ -1157,7 +1527,9 @@ function tune(pid) {
 function onStream(c, pid, stream, meta) {
   const v = S.voice
   const k = meta && meta.k
-  if (!v || v.sid !== c.sid || !['mic', 'cam', 'scr'].includes(k)) return
+  if (!v || v.sid !== c.sid) return
+  if (k === 'rmic') { onRelayStream(c, pid, stream, meta.o); return }
+  if (!['mic', 'cam', 'scr'].includes(k)) return
   const r = v.remote[pid] ||= {}
   r[k] = stream
   const drop = () => { if (r[k] === stream) { delete r[k]; if (k === 'scr') dropScreenAudio(pid); inv('stage') } }
@@ -1165,17 +1537,24 @@ function onStream(c, pid, stream, meta) {
   stream.getTracks().forEach(t => t.addEventListener('ended', drop))
   if (k === 'scr') attachScreenAudio(pid, stream)
   if (k === 'mic') {
-    let a = S.audios[pid]
-    if (!a) {
-      a = S.audios[pid] = document.createElement('audio')
-      a.autoplay = true
-      $('#audios').appendChild(a)
-    }
-    a.srcObject = stream
-    applyAudio()
-    a.play().catch(() => toast('Sesi duymak için sayfaya bir kez tıkla.'))
+    // Bu kişinin sesi daha önce aracı üzerinden geliyorduysa artık doğrudan gelir
+    delete r.via
+    playMic(pid, stream)
+    // Bu kişinin sesini aracı olarak başkalarına da iletiyorsak yeni akışa geç
+    syncRelayOutAll(c)
   }
   inv('stage')
+}
+function playMic(key, stream) {
+  let a = S.audios[key]
+  if (!a) {
+    a = S.audios[key] = document.createElement('audio')
+    a.autoplay = true
+    $('#audios').appendChild(a)
+  }
+  if (a.srcObject !== stream) a.srcObject = stream
+  applyAudio()
+  a.play().catch(() => toast('Sesi duymak için sayfaya bir kez tıkla.'))
 }
 // Yayın (oyun) sesi görüntüden bağımsız çalar: izleyici sohbete geçse de, görüntü kodlaması dursa da ses devam eder
 function attachScreenAudio(pid, stream) {
@@ -1217,7 +1596,8 @@ function dropRemote(pid) {
 }
 function uidOfPid(pid) {
   const v = S.voice
-  return v && S.conns[v.sid]?.peers[pid]?.uid
+  const c = v && S.conns[v.sid]
+  return c && (c.peers[pid]?.uid || c.ghosts[pid]?.uid)
 }
 function volOf(uid) { const x = S.vol[uid]; return typeof x === 'number' ? Math.min(1, Math.max(0, x)) : 1 }
 const svolOf = uid => { const x = S.svol[uid]; return typeof x === 'number' ? Math.min(1, Math.max(0, x)) : 1 }
@@ -1235,8 +1615,10 @@ function applyAudio() {
 }
 function applyMic() {
   const v = S.voice
-  const t = v?.mic?.getAudioTracks()[0]
-  if (t) t.enabled = !S.st.m && !S.st.d && (!S.settings.ptt || S.pttDown)
+  if (!v) return
+  const on = !S.st.m && !S.st.d && (!S.settings.ptt || S.pttDown)
+  // Ham mikrofon da kapanır: susturulmuşken gürültü modeli hiç çalışmaz (işlemci harcamaz)
+  for (const s of [v.mic, v.micRaw]) { const t = s?.getAudioTracks()[0]; if (t) t.enabled = on }
 }
 function setMute(m) {
   S.st.m = m
@@ -1310,7 +1692,8 @@ function stopVad() {
 function isSpeaking(pk) {
   if (pk === 'me') return !!(S.voice?.spk && !S.st.m)
   const [sid, pid] = pk.split(':')
-  const p = S.conns[sid]?.peers[pid]
+  const c = S.conns[sid]
+  const p = c && (c.peers[pid] || c.ghosts[pid])
   return !!(p && p.st.spk && !p.st.m)
 }
 function updateSpeaking() {
@@ -1669,6 +2052,10 @@ function stageTiles() {
     tiles.push({key: pid + ':u', pk: c.sid + ':' + pid, kind: 'u', n: p.n, c: p.c, stream: p.st.cam ? r.cam || null : null, m: p.st.m, d: p.st.d})
     if (p.st.scr) tiles.push({key: pid + ':s', pid, kind: 's', n: p.n, c: p.c, stream: v.watching.has(pid) ? r.scr || null : null, watching: v.watching.has(pid)})
   }
+  for (const u of voiceUsers(v.sid, v.cid)) {
+    if (!u.ind && !u.lost) continue
+    tiles.push({key: u.pid + ':u', pk: u.pk, kind: 'u', n: u.n, c: u.c, stream: null, m: u.st.m, d: u.st.d, note: u.lost ? '⏳ yeniden bağlanıyor' : '🔗 arkadaş üzerinden'})
+  }
   return tiles
 }
 function tileEl(t) {
@@ -1720,7 +2107,7 @@ function tileEl(t) {
   unw.hidden = !(t.kind === 's' && !t.mine && t.watching)
   pip.hidden = !(hasVideo && !t.mine && document.pictureInPictureEnabled)
   const icons = t.kind === 's' ? '<span class="live">CANLI</span> ' : t.d ? '🔇 ' : t.m ? '🎙️̸ ' : ''
-  const ltxt = icons + esc(t.n) + (t.kind === 's' ? ' — ekran' : '') + (t.mine && t.kind === 'u' ? ' (sen)' : '')
+  const ltxt = icons + esc(t.n) + (t.kind === 's' ? ' — ekran' : '') + (t.mine && t.kind === 'u' ? ' (sen)' : '') + (t.note ? ` · <small>${t.note}</small>` : '')
   if (lbl.dataset.sig !== ltxt) { lbl.dataset.sig = ltxt; lbl.innerHTML = ltxt }
   if (t.kind === 'u') { el.dataset.pk = t.pk; el.classList.toggle('spk', isSpeaking(t.pk)) } else delete el.dataset.pk
   return el
@@ -1973,7 +2360,9 @@ function destroyPlayer() {
   MP.ready = null
   MP.isReady = false
   MP.vid = null
+  MP.applied = null
   MP.blocked = false
+  msyncReset()
   $('#mwrap').innerHTML = ''
 }
 // Yerel oynatıcıyı, içinde bulunduğum ses kanalının müzik durumuna getir (sıralı çalışır)
@@ -1990,8 +2379,13 @@ async function applyMusicNow() {
   const now = S.music[myMusicKey()]
   if (!now || !now.cur) return
   const want = mPos(now)
+  const was = MP.applied
+  MP.applied = {id: now.cur.id, playing: now.playing}
+  // Duraklat/devam: eski konum bildirimleri geçersiz (duraklama süresi "ileride" sanılmasın)
+  if (was && was.playing !== now.playing) msyncReset()
   if (MP.vid !== now.cur.id) {
     MP.vid = now.cur.id
+    msyncReset()
     if (now.playing) p.loadVideoById({videoId: now.cur.id, startSeconds: want}); else p.cueVideoById({videoId: now.cur.id, startSeconds: want})
     if (now.playing) {
       // Tarayıcı otomatik oynatmayı engellediyse "başlat" butonu göster
@@ -2004,9 +2398,19 @@ async function applyMusicNow() {
       }, 4000)
     }
   } else {
+    // Aynı şarkı: sıra/ses değişikliğinde konuma dokunma (gereksiz atlama olmasın).
+    // Yalnızca duraklatma/devam etmede herkes aynı noktaya gelir; çalarken ince eşitlemeyi musicSyncTick yapar.
     try {
-      if (Math.abs(p.getCurrentTime() - want) > 2) p.seekTo(want, true)
-      if (now.playing) p.playVideo(); else p.pauseVideo()
+      const ps = p.getPlayerState()
+      if (!now.playing) {
+        if (ps !== 2 && ps !== 5) p.pauseVideo()
+        if (Math.abs(p.getCurrentTime() - want) > 1) p.seekTo(want, true)
+      } else {
+        if (!was || was.id !== now.cur.id || !was.playing) {
+          if (Math.abs(p.getCurrentTime() - want) > 1) { p.seekTo(want, true); msyncReset() }
+        }
+        if (ps !== 1 && ps !== 3) p.playVideo()
+      }
     } catch {}
   }
   musicVolume()
@@ -2017,6 +2421,10 @@ function amMusicLeader() {
 }
 function onYtState(e) {
   if (e.data === 1) {
+    // Gerçekten çalmaya başladı (reklam/yükleme bitti): hemen diğerlerine yetiş
+    MSYNC.lastT = null
+    MSYNC.fresh = true
+    setTimeout(musicSyncTick, 350)
     if (MP.blocked) { MP.blocked = false; renderMusic() }
     // Link başlığı alınamadıysa oynatıcıdan oku
     const st = S.music[myMusicKey()]
@@ -2107,8 +2515,72 @@ function musicButton(act) {
   if (act === 'm-skip') setMusic(key, {q: st.q.slice(1), cur: st.q[0] || null, playing: true, pos: 0})
   if (act === 'm-stop') setMusic(key, {q: [], cur: null, playing: false, pos: 0})
 }
-// Kayma düzeltmesi: çalarken ara sıra konumu kontrol et
-setInterval(() => { const st = S.music[myMusicKey()]; if (st?.playing && MP.isReady && !pageHidden()) applyMusic() }, 15000)
+// ---------- müzik eşitleme ----------
+// Eski yöntem şarkının saatini komut anında başlatıyordu: yükleme ya da reklam sürerken saat ilerliyor,
+// 15 sn sonraki düzeltme de şarkıyı birden ileri sarıyordu. Artık:
+// - herkesin saati kendi oynatıcısının GERÇEKTEN çaldığı konuma bağlı (reklam/yükleme süresi sayılmaz),
+// - ses kanalındakiler gerçek konumlarını 2 sn'de bir birbirine bildirir,
+// - geride kalan en öndekine hemen yetişir; kimse geri sarılmaz, aynı yeri iki kez duymaz.
+const MSYNC = {peers: {}, rtt: {}, lastT: null, lastAt: 0, lastSeek: 0, comp: 0.15, check: false, tick: 0, fresh: false, pingAt: 0}
+function msyncReset() {
+  MSYNC.peers = {}
+  MSYNC.lastT = null
+  MSYNC.check = false
+  MSYNC.fresh = true
+  MSYNC.lastSeek = performance.now() - 3000
+}
+function onMclk(c, d, pid) {
+  const key = myMusicKey()
+  if (!key || c.sid !== S.voice.sid || !d || d.vc !== S.voice.cid || !isYtId(d.id) || !Number.isFinite(+d.t)) return
+  const st = S.music[key]
+  if (!st?.cur || st.cur.id !== d.id) return
+  MSYNC.peers[pid] = {id: d.id, t: Math.max(0, +d.t), at: performance.now()}
+}
+function musicSyncTick() {
+  const key = myMusicKey(), st = key && S.music[key], p = MP.player
+  if (!st?.cur || !st.playing || !MP.isReady || !p || MP.vid !== st.cur.id) { MSYNC.lastT = null; return }
+  let t, ps
+  try { t = +p.getCurrentTime() || 0; ps = p.getPlayerState() } catch { return }
+  const nw = performance.now()
+  const dt = (nw - MSYNC.lastAt) / 1000
+  // "Çalıyor" sayılması için zamanın gerçekten akması gerekir (reklam, tamponlama, yeni atlama sırasında değil)
+  const prog = ps === 1 && MSYNC.lastT !== null && dt > 0.2 && t - MSYNC.lastT > dt * 0.6 && t - MSYNC.lastT < dt * 1.6 + 0.3
+  MSYNC.lastT = t
+  MSYNC.lastAt = nw
+  if (!prog) return
+  st.base = {p: t, tr: nw}
+  const peers = voicePeers()
+  const c = S.conns[S.voice.sid]
+  if (c && peers.length && (MSYNC.fresh || ++MSYNC.tick % 4 === 0)) {
+    MSYNC.fresh = false
+    try { c.a.mclk.send({vc: S.voice.cid, id: st.cur.id, t: Math.round(t * 1000) / 1000}, {target: peers}) } catch {}
+  }
+  // Gecikme ölçümü (20 sn'de bir, yalnızca müzik çalarken)
+  if (c && peers.length && nw - MSYNC.pingAt > 20000) {
+    MSYNC.pingAt = nw
+    for (const pid of peers) c.room.ping(pid).then(ms => { MSYNC.rtt[pid] = Math.min(1000, ms) }).catch(() => {})
+  }
+  let lead = -1
+  for (const [pid, x] of Object.entries(MSYNC.peers)) {
+    if (x.id !== st.cur.id || nw - x.at > 3000 || !peers.includes(pid)) continue
+    lead = Math.max(lead, x.t + (nw - x.at) / 1000 + (MSYNC.rtt[pid] ?? 80) / 2000)
+  }
+  if (lead < 0) return
+  const behind = lead - t
+  // Son atlamadan sonra kalan farkı ölç: bir sonraki atlamanın telafisini ayarla (aşırı ileri gitmeden)
+  if (MSYNC.check && nw - MSYNC.lastSeek > 1500) {
+    MSYNC.check = false
+    if (Math.abs(behind) > 0.06) MSYNC.comp = Math.min(1.2, Math.max(0, MSYNC.comp + behind * 0.5))
+  }
+  if (behind > 0.35 && nw - MSYNC.lastSeek > 4000) {
+    try { p.seekTo(lead + MSYNC.comp, true) } catch {}
+    MSYNC.lastSeek = nw
+    MSYNC.check = true
+    MSYNC.lastT = null
+    MSYNC.fresh = true
+  }
+}
+setInterval(musicSyncTick, 500)
 
 // ======================= modallar / popoverlar =======================
 function modal(html, onMount) {
@@ -2345,7 +2817,14 @@ async function settingsModal(tab = 'profile') {
       <div data-pane="voice">
         <div class="field"><label>Mikrofon</label><select class="inp" name="mic">${opts('audioinput', s.mic)}</select></div>
         <div class="field"><label>Giriş hassasiyeti (konuşma algılama eşiği)</label><input type="range" name="sens" min="2" max="40" value="${s.sens}"><div class="meter"><i id="lvl"></i></div><div class="hint" id="lvlhint">${S.voice?.mic ? 'Konuştuğunda çubuk yeşil çizgiyi geçmeli.' : 'Seviyeyi görmek için bir ses kanalına katıl.'}</div></div>
-        ${sw('ns', s.ns, 'Gürültü engelleme')}${sw('ec', s.ec, 'Yankı engelleme')}${sw('agc', s.agc, 'Otomatik ses seviyesi')}
+        <div class="field"><label>Gürültü engelleme</label><select class="inp" name="nsm">
+          <option value="ai"${s.nsm === 'ai' ? ' selected' : ''}>Güçlü, önerilen (yapay zekâ): klavye, nefes, fan, arka plan sesleri</option>
+          <option value="std"${s.nsm === 'std' ? ' selected' : ''}>Standart (tarayıcının kendi filtresi)</option>
+          <option value="off"${s.nsm === 'off' ? ' selected' : ''}>Kapalı</option></select>
+          <div class="hint" id="nshint">Güçlü modda sen konuşmuyorken mikrofonun tamamen sessizdir: klavye, fare, nefes ve uğultu gitmez. Konuşurken de arka plan gürültüsü silinir.</div></div>
+        <div id="nbgrow">${sw('nbg', s.nbg !== false, 'Arka plandaki konuşmaları da engelle (odadaki başkaları, TV)')}<div class="hint" style="margin-top:-4px">Sesinden belirgin biçimde kısık gelen konuşmaları keser. Mikrofondan uzaklaşınca sesin kesiliyorsa bunu kapat.</div></div>
+        <div class="row"><span>Mikrofon testi: kendi sesini filtrelenmiş hâliyle duy <small class="hint">(kulaklık tak)</small></span><button type="button" class="btn sec" id="mtest" style="border:1px solid var(--line)">Testi başlat</button></div>
+        ${sw('ec', s.ec, 'Yankı engelleme')}${sw('agc', s.agc, 'Otomatik ses seviyesi')}
         ${sw('ptt', s.ptt, 'Bas-konuş (Push-to-talk)')}
         <div class="row"><span>Bas-konuş tuşu</span><button type="button" class="btn sec" id="pttk" style="border:1px solid var(--line)">${esc(keyName(s.pttKey))}</button></div>
         ${sw('sounds', s.sounds, 'Giriş/çıkış sesleri')}
@@ -2366,13 +2845,13 @@ async function settingsModal(tab = 'profile') {
       <div data-pane="desktop">${DESK ? `
         <label class="row"><span>Bilgisayar açılınca başlat (arka planda)</span><span class="sw"><input type="checkbox" id="d-auto"><i></i></span></label>
         <label class="row"><span>Kapatınca sistem tepsisine küçült</span><span class="sw"><input type="checkbox" id="d-tray"><i></i></span></label>
-        <label class="row"><span>Genel kısayollar: <b>Ctrl+Shift+M</b> mikrofon, <b>Ctrl+Shift+D</b> sağırlaştır</span><span class="sw"><input type="checkbox" id="d-keys"><i></i></span></label>
+        <label class="row"><span>Genel kısayol: <b>Ctrl+Shift+M</b> mikrofonu aç/kapat</span><span class="sw"><input type="checkbox" id="d-keys"><i></i></span></label>
         <label class="row" hidden id="d-ads-row"><span>Müzik botunda YouTube reklamlarını engelle</span><span class="sw"><input type="checkbox" id="d-ads"><i></i></span></label>
         <div class="hint" id="d-info">Bas-konuş tuşu (Ses sekmesi) bu uygulamada oyun öndeyken de çalışır. Ekran paylaşırken bilgisayar sesi otomatik alınır.</div>` : `
         <p class="hint" style="font-size:14px">Kanka Chat'in Windows uygulaması tarayıcının yapamadıklarını ekler:</p>
         <ul class="hint" style="font-size:13px;line-height:1.7;padding-left:18px">
           <li><b>Bas-konuş oyun içindeyken de çalışır</b> (klavye tuşu veya fare yan tuşu)</li>
-          <li>Oyundayken <b>Ctrl+Shift+M</b> ile mikrofon, <b>Ctrl+Shift+D</b> ile sağırlaştırma</li>
+          <li>Oyundayken <b>Ctrl+Shift+M</b> ile mikrofonu aç/kapat</li>
           <li>Ekran paylaşırken oyun sesi kutucuk işaretlemeden otomatik alınır</li>
           <li>Müzik botunda <b>YouTube reklamları engellenir</b></li>
           <li>Sistem tepsisi, bilgisayarla başlama, görev çubuğunda bildirim rozeti</li>
@@ -2424,11 +2903,17 @@ async function settingsModal(tab = 'profile') {
     })
     const lvl = root.querySelector('#lvl'), sens = f.sens
     const iv = setInterval(() => {
-      const l = S.level || 0
+      const l = S.mtest ? S.mtest.level() : S.level || 0
       lvl.style.width = Math.min(100, l / 40 * 100) + '%'
       lvl.style.background = l > +sens.value ? 'var(--green)' : 'var(--yellow)'
     }, 100)
-    S.modalCleanup = () => clearInterval(iv)
+    S.modalCleanup = () => { clearInterval(iv); stopMicTest() }
+    const nsSync = () => { root.querySelector('#nbgrow').hidden = f.nsm.value !== 'ai' }
+    nsSync()
+    f.nsm.addEventListener('change', () => { nsSync(); if (S.mtest) { stopMicTest(); micTest(f, mt) } })
+    f.nbg.addEventListener('change', () => S.mtest?.chain?.setBg(f.nbg.checked))
+    const mt = root.querySelector('#mtest')
+    mt.addEventListener('click', () => { if (S.mtest) stopMicTest(); else micTest(f, mt) })
     sens.addEventListener('input', () => { s.sens = +sens.value })
     root.querySelector('[data-close]').addEventListener('click', closeModal)
     if (DESK) {
@@ -2468,20 +2953,22 @@ async function settingsModal(tab = 'profile') {
       location.reload()
     })
     root.querySelector('#save').addEventListener('click', async () => {
-      const prevAudio = [s.mic, s.ns, s.ec, s.agc].join()
+      const prevAudio = [s.mic, s.nsm, s.ec, s.agc].join()
+      const prevBg = s.nbg
       const name = clamp(f.name.value.trim(), 32)
       const profChanged = (name && name !== S.me.name) || color !== S.me.color
       if (name) S.me.name = name
       S.me.color = color
       LS.set('kd_me', S.me)
       Object.assign(s, {
-        mic: f.mic.value, cam: f.cam.value, sens: +f.sens.value, ns: f.ns.checked, ec: f.ec.checked, agc: f.agc.checked,
+        mic: f.mic.value, cam: f.cam.value, sens: +f.sens.value, nsm: f.nsm.value, ns: f.nsm.value !== 'off', nbg: f.nbg.checked, ec: f.ec.checked, agc: f.agc.checked,
         ptt: f.ptt.checked, pttKey, pttRaw, sounds: f.sounds.checked, echoGuard: f.echoGuard.checked, vq: f.vq.value, notif: f.notif.checked, members: f.members.checked
       })
       saveSettings()
       if (s.notif && 'Notification' in window && Notification.permission === 'default') Notification.requestPermission().catch(() => {})
       if (profChanged) for (const c of Object.values(S.conns)) c.a.hello.send(helloData(c.sid))
-      if (S.voice && prevAudio !== [s.mic, s.ns, s.ec, s.agc].join()) await restartMic()
+      if (S.voice && prevAudio !== [s.mic, s.nsm, s.ec, s.agc].join()) await restartMic()
+      else if (S.voice?.chain && prevBg !== s.nbg) S.voice.chain.setBg(s.nbg)
       applyMic()
       syncDesktop()
       if (S.voice) for (const pid of voicePeers()) tune(pid)
@@ -2491,11 +2978,48 @@ async function settingsModal(tab = 'profile') {
     })
   })
 }
+// Mikrofon testi: filtrelenmiş sesini (formdaki seçimlerle) kendi hoparlörüne/kulaklığına çalar
+async function micTest(f, btn) {
+  const o = {mic: f.mic.value, nsm: f.nsm.value, nbg: f.nbg.checked, ec: f.ec.checked, agc: f.agc.checked}
+  btn.disabled = true
+  let raw
+  try { raw = await getMic(o) } catch (e) { btn.disabled = false; toast('Mikrofona erişilemedi: ' + (e.name || e.message)); return }
+  const built = await buildMic(raw, o)
+  btn.disabled = false
+  if (!btn.isConnected) { built.chain?.stop(); built.raw.getTracks().forEach(t => t.stop()); return }
+  const a = new Audio()
+  a.srcObject = built.stream
+  a.play().catch(() => {})
+  const meter = makeMeter(built.stream)
+  S.mtest = {...built, a, meter, level: () => meter ? meter.level() : 0}
+  btn.textContent = 'Testi durdur'
+  btn.classList.add('red')
+}
+function stopMicTest() {
+  const t = S.mtest
+  if (!t) return
+  S.mtest = null
+  t.a.srcObject = null
+  t.meter?.stop()
+  t.chain?.stop()
+  for (const s of [t.stream, t.raw]) s?.getTracks().forEach(x => x.stop())
+  setTimeout(vctxIdle, 0)
+  const b = $('#mtest')
+  if (b) { b.textContent = 'Testi başlat'; b.classList.remove('red') }
+}
 async function restartMic() {
   const v = S.voice
   if (!v) return
-  let mic
-  try { mic = await getMic() } catch (e) { toast('Mikrofon değiştirilemedi: ' + (e.name || e.message)); return }
+  let raw
+  try { raw = await getMic() } catch (e) { toast('Mikrofon değiştirilemedi: ' + (e.name || e.message)); return }
+  if (S.voice !== v) { raw.getTracks().forEach(t => t.stop()); return }
+  const built = await buildMic(raw)
+  if (S.voice !== v) { built.chain?.stop(); built.raw.getTracks().forEach(t => t.stop()); return }
+  const mic = built.stream
+  const oldRaw = v.micRaw, oldChain = v.chain
+  v.micRaw = built.raw
+  v.chain = built.chain
+  const stopOld = () => { oldChain?.stop(); if (oldRaw && oldRaw !== v.mic) oldRaw.getTracks().forEach(t => t.stop()) }
   const old = v.mic
   const c = S.conns[v.sid]
   if (old && c) {
@@ -2508,10 +3032,12 @@ async function restartMic() {
     // replaceTrack akışı değiştirmez; eşlemeyi koru
     old.removeTrack?.(ot)
     old.addTrack?.(nt)
-    ot.stop()
+    if (ot !== nt) ot.stop()
     mic.getTracks().forEach(t => { if (t !== nt) t.stop() })
+    stopOld()
   } else {
     v.mic = mic
+    stopOld()
     syncAllMedia()
   }
   applyMic()
@@ -2523,7 +3049,7 @@ function profilePop(uid, anchor) {
   const u = isMe ? {n: S.me.name, c: S.me.color} : knownUser(uid)
   const on = isMe || !!onlineUser(uid)
   const vpid = !isMe && S.voice ? voicePeers().find(pid => S.conns[S.voice.sid].peers[pid].uid === uid) : null
-  const inVoice = !!vpid
+  const inVoice = !!vpid || (!isMe && !!S.voice && voiceUsers(S.voice.sid, S.voice.cid).some(u => u.uid === uid && u.ind))
   const streaming = inVoice && S.voice.watching.has(vpid)
   pop(`<div class="prof"><div class="ph">${avatar(u.n, u.c, 's80', `<span class="dot${on ? '' : ' off'}"></span>`)}<div class="pn">${esc(u.n)}</div><div class="uid">${on ? 'Çevrimiçi' : 'Çevrimdışı'}</div></div>
     ${inVoice ? `<div style="padding:0 8px 8px"><div class="lbl2">Kullanıcı ses seviyesi</div><input type="range" min="0" max="100" value="${Math.round(volOf(uid) * 100)}" data-vol="${esc(uid)}"></div>` : ''}
@@ -2891,7 +3417,9 @@ function boot() {
   persistAll()
   if (DESK) {
     // Oyun öndeyken bile çalışan kısayollar ve bas-konuş (masaüstü uygulaması)
-    DESK.onHotkey(n => { if (n === 'mute') setMute(!S.st.m); else if (n === 'deafen') setDeaf(!S.st.d) })
+    // Sağırlaştırma kısayolu kaldırıldı: eski uygulama sürümlerinin Ctrl+Shift+D'si ('deafen') bilerek yok sayılır.
+    // Tepsi menüsündeki "Sağırlaştır" düğmesi ('tray-deafen') çalışmaya devam eder.
+    DESK.onHotkey(n => { if (n === 'mute') setMute(!S.st.m); else if (n === 'tray-deafen') setDeaf(!S.st.d) })
     DESK.onPtt(down => {
       // Kanka penceresinde yazı yazarken klavyedeki bas-konuş tuşu mikrofonu açmasın (bırakma her zaman işlenir)
       if (down && !String(S.settings.pttKey).startsWith('Mouse') && document.hasFocus() && /^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement?.tagName || '')) return
@@ -2902,9 +3430,16 @@ function boot() {
     syncDesktop()
   }
   if ('serviceWorker' in navigator && location.protocol === 'https:') navigator.serviceWorker.register('sw.js').catch(() => {})
+  // Sayfa kapanırken "hoşça kal" de: arkadaşlar bunu ağ kopmasından ayırır ("yeniden bağlanıyor" göstermez).
+  // Bağlantılar kurulmadan önce eklenir ki kütüphanenin kendi kapanış işleminden önce çalışsın.
+  let byeSent = false
+  const byeAll = () => { if (byeSent) return; byeSent = true; for (const c of Object.values(S.conns)) sendBye(c) }
+  addEventListener('beforeunload', byeAll)
+  addEventListener('pagehide', byeAll)
   // Donanım codec'lerini tespit et, sonra eşlere bildir
   probeCodecs().then(() => { for (const c of Object.values(S.conns)) c.a.hello.send(helloData(c.sid)) })
   for (const s of S.servers) connect(s)
+  if (S.settings.nsm === 'ai') setTimeout(() => loadDenoiser().catch(() => {}), 4000)
   if (location.hash.includes('j=')) checkHashInvite()
   else if (S.view.sid && !srvById(S.view.sid)) S.view = {sid: null, cid: null}
   if (!S.view.sid && !S.view.cid && S.servers.length && !location.hash) S.view = {sid: S.servers[0].id, cid: null}
@@ -2921,3 +3456,5 @@ bind()
   if (!S.me) await restoreAccount()
   if (!S.me) onboarding(); else boot()
 })()
+// Otomatik testler için iç duruma erişim (yalnızca adres ?kdtest içerirse)
+if (new URLSearchParams(location.search).has('kdtest')) window.__kd = {S, selfId, chanPresence}

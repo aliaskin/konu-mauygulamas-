@@ -15,11 +15,22 @@ Mesajlar, ses ve görüntü doğrudan arkadaşlarının cihazlarına (P2P, WebRT
   `!skip`, `!pause`, `!resume`, `!stop`, `!queue`, `!np`, `!remove 2`, `!ses 50` (herkes için bot sesi), `!help`.
   Müzik panelindeki kaydırıcı ve 🔇 düğmesi yalnızca senin duyduğun bot sesini ayarlar. Video gösterilmez: oynatıcı görünmez ve
   1×1 pikseldir, YouTube en düşük video kalitesini seçtiği için ek işlemci/internet yükü neredeyse yoktur. Kanaldaki herkes aynı şarkıyı senkron dinler
-  (sonradan katılan doğru saniyeden girer). Her dinleyici şarkıyı kendi tarayıcısındaki resmi YouTube oynatıcısıyla çalar;
+  (sonradan katılan doğru saniyeden girer). Herkes gerçek çalma konumunu 2 saniyede bir paylaşır; yavaş yükleyen ya da reklam
+  izleyen kişi, şarkısı başlar başlamaz diğerlerine yetişir (fark ~0,1 sn), kimse geri sarılmaz ve aynı yeri iki kez duymaz.
+  Her dinleyici şarkıyı kendi tarayıcısındaki resmi YouTube oynatıcısıyla çalar;
   kimsenin bilgisayarı başkası için ses yayınlamaz. Müzik sesi herkesin kendi kontrolündedir
 - **Direkt mesajlar (DM)**: üye listesinde birine tıkla → “Mesaj gönder”
-- **Sesli sohbet**: gürültü/yankı engelleme, konuşan kişinin yeşil çerçevesi, sustur/sağırlaştır, bas-konuş (push-to-talk),
+- **Sesli sohbet**: yankı engelleme, konuşan kişinin yeşil çerçevesi, sustur/sağırlaştır, bas-konuş (push-to-talk),
   kişi başı ses seviyesi, giriş hassasiyeti
+- **🤫 Yapay zekâ gürültü engelleme** (varsayılan açık, Ayarlar → Ses): mikrofon RNNoise 0.2 yapay sinir ağından ve akıllı bir
+  ses kapısından geçer. Sen konuşmuyorken mikrofonun tamamen sessizdir: **klavye, fare tıkırtısı, nefes, fan, uğultu** gitmez;
+  konuşurken de arka plan gürültüsü silinir. Kendi ses seviyeni öğrenir; senden belirgin biçimde kısık gelen **arka plan
+  konuşmalarını** (odadaki başkaları, TV) da keser (ayrı anahtarla kapatılabilir). “Mikrofon testi” ile kendi sesini filtrelenmiş
+  hâliyle dinleyebilirsin. Ayrı bir ses iş parçacığında çalışır; susturulmuşken ya da bas-konuş bırakılmışken hiç işlemci harcamaz
+- **Kopmaya dayanıklı sesli kanal**: bağlantısı sessizce yenilenen kişinin sesi kendiliğinden yeniden kurulur; ses akışları
+  düzenli denetlenir, gitmeyen ya da gelmeyen ses onarılır. Biriyle doğrudan bağlantı kurulamazsa o kişi kanalda 🔗 ile görünür,
+  sesi ve mesajları ikinize de bağlı bir arkadaş üzerinden gelir. Habersiz kopan kişi “yeniden bağlanıyor” (⏳) olarak görünür,
+  geri gelince giriş/çıkış sesi çalmadan devam eder
 - **Görüntülü sohbet**: kamera aç/kapa, tıkla büyüt, tam ekran
 - **Ekran paylaşımı**: **Kaynak** (ekranın kendi çözünürlüğü, en net) / 4K / 1440p / 1080p / 720p, 30 / 60 / **120 FPS**, “Oyun/Video” (akıcılık) veya “Yazı/Kod” (netlik) modu,
   **oyun/bilgisayar sesi** (stereo, 192 kbps) ve **yankı koruması**: yayıncının bilgisayarında çalan sohbet sesleri
@@ -38,7 +49,7 @@ Mesajlar, ses ve görüntü doğrudan arkadaşlarının cihazlarına (P2P, WebRT
 
 Tarayıcının yapamadıklarını ekler:
 - **Bas-konuş oyun içindeyken de çalışır**: klavye tuşu veya fare yan tuşu (Ayarlar → Ses → Bas-konuş)
-- **Genel kısayollar**: oyundayken `Ctrl+Shift+M` mikrofon, `Ctrl+Shift+D` sağırlaştır
+- **Genel kısayol**: oyundayken `Ctrl+Shift+M` mikrofonu aç/kapat (yanlışlıkla basılmasın diye sağırlaştırma kısayolu yok)
 - **Kendi ekran seçicisi**: oyun sesi kutucuk işaretlemeden otomatik alınır (Windows), sohbet sesleri yankı korumasıyla temizlenir
 - **Müzik botunda YouTube reklamları engellenir** (Ayarlar → Masaüstü'den kapatılabilir). Tarayıcıda engellemek için uBlock Origin eklentisi
 - Sistem tepsisi (kapatınca arka planda çalışır), bilgisayar açılınca başlama, görev çubuğunda bahsetme rozeti
@@ -104,8 +115,11 @@ HTTPS veren herhangi bir statik barındırma (Netlify, Cloudflare Pages, Vercel�
 - Sunucu olmadığı için mesaj geçmişi herkesin kendi tarayıcısında saklanır ve çevrimiçi olan üyeler arasında eşitlenir.
   Sen yokken yazılan mesajlar, o sırada çevrimiçi olan biri tekrar geldiğinde sana da gelir.
 - Eşleşme (birbirini bulma) herkese açık Nostr röleleri üzerinden yapılır; içerik bu rölelerden geçmez.
-- Bağlantı doğrudan kurulur. Çok katı ağlarda (bazı mobil operatörler, kurumsal ağlar) iki kişi bağlanamayabilir;
-  bu durumda başka bir ağ (ev Wi-Fi'ı) dene.
+- Bağlantı doğrudan kurulur. Çok katı ağlarda (bazı mobil operatörler, kurumsal ağlar) iki kişi doğrudan bağlanamayabilir:
+  önce herkese açık bir yedek aktarım sunucusu (TURN) denenir; o da olmazsa ses ve mesajlar, ikisine de bağlı bir arkadaş
+  üzerinden aktarılır (🔗). Yalnızca iki kişiyseniz ve ikisi de olmazsa başka bir ağ (ev Wi-Fi'ı) dene.
+- **Gürültü engelleme** ilk kullanımda 1,4 MB'lık model dosyasını bir kez indirir (sonra önbellekten gelir). Arka plan
+  konuşması engeli ses seviyesine bakar: mikrofondan uzaklaşınca sesin kesiliyorsa Ayarlar → Ses'ten bu anahtarı kapat.
 - Mesh yapı nedeniyle sesli/görüntülü odalar ~8 kişiye kadar en iyi sonucu verir (arkadaş grubu için ideal).
 - Davet kodu sunucunun şifresidir; yalnızca güvendiğin kişilerle paylaş.
 
@@ -117,5 +131,8 @@ npm run build   # src/ → docs/index.html
 npx serve docs  # http://localhost:3000
 ```
 
-Kaynaklar: `src/main.js` (uygulama), `src/media.js` (codec seçimi, SDP ayarları, yayın bit hızı ve istatistikler), `src/style.css` (tema), `src/index.html` (iskelet), `build.mjs` (tek dosyaya paketleme).
+Kaynaklar: `src/main.js` (uygulama), `src/media.js` (codec seçimi, SDP ayarları, yayın bit hızı ve istatistikler), `src/voice.js` (gürültü engelleme ve ses kapısı), `src/echo.js` (yayın sesi yankı koruması), `src/music.js` (müzik botu), `src/style.css` (tema), `src/index.html` (iskelet), `build.mjs` (tek dosyaya paketleme).
+
+Üçüncü taraf bileşenler: gürültü engelleme modeli `public/rnnoise.wasm`, [xiph/rnnoise](https://github.com/xiph/rnnoise) 0.2 (BSD-3-Clause)
+ve [jitsi/rnnoise-wasm](https://github.com/jitsi/rnnoise-wasm) derlemesidir (Apache-2.0); lisans metinleri `public/THIRD_PARTY_NOTICES.txt` dosyasında.
 Özel Nostr röleleri için: `index.html?relay=wss://röle1,wss://röle2`. Codec'i zorlamak için: `?codec=AV1` (veya `VP9`, `H264`, `VP8`).
